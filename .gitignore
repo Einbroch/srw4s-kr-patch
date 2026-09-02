@@ -1,0 +1,26 @@
+# 게임 데이터는 절대 올리지 않는다
+*.bin
+*.cue
+*.iso
+*.img
+*.LZB
+*.BIN
+*.dec
+*.exe
+extract/
+build/
+analysis/
+translation/
+_work/
+
+# 원문 스크립트가 든 작업 파일
+*_ledger.json
+karaoke_lyrics.*
+untranslated.*
+
+# 잡동사니
+__pycache__/
+*.pyc
+*.bak
+*.orig
+scratchpad/

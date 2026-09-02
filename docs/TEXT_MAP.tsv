@@ -1,0 +1,20 @@
+source	region	stable_id_pattern	structure	entry_count	terminator	encoding	consumer_evidence	status
+DAT/D_NAMES.BIN	section-00	D_NAMES:S00:Exxxx	16-bit absolute pointer subtable	243	FF	custom-variable-byte	STAYDAT resident at 0x80069800; MAP consumers prove glyph decode; control arity cross-validated	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-01	D_NAMES:S01:Exxxx	16-bit absolute pointer subtable	253	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-02	D_NAMES:S02:Exxxx	16-bit absolute pointer subtable	96	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-03	-	null header entry	0	-	-	same	null
+DAT/D_NAMES.BIN	section-04	D_NAMES:S04:Exxxx	16-bit absolute pointer table	304	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-05	D_NAMES:S05:Exxxx	alias subtable inside section-04 table	48	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-06	D_NAMES:S06:Exxxx	16-bit absolute pointer table	320	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-07	D_NAMES:S07:Exxxx	16-bit absolute pointer table	320	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-08	D_NAMES:S08:Exxxx	16-bit absolute pointer table	656	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-09	D_NAMES:S09:Exxxx	alias subtable inside section-08 table	400	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-10	D_NAMES:S10:Exxxx	alias subtable inside section-08/09 table	144	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-11	D_NAMES:S11:Exxxx	16-bit absolute pointer table	96	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-12	D_NAMES:S12:Exxxx	16-bit absolute pointer table	256	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-13	D_NAMES:S13:Exxxx	16-bit absolute pointer table	377	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-14	D_NAMES:S14:Exxxx	16-bit absolute pointer table	128	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-15	D_NAMES:S15:Exxxx	16-bit absolute pointer table	160	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-16	D_NAMES:S16:Exxxx	alias subtable inside section-13 table	153	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/D_NAMES.BIN	section-17	D_NAMES:S17:Exxxx	16-bit absolute pointer table	136	FF	custom-variable-byte	same	inventory-complete_charmap-target-validation
+DAT/M_BANKS.BIN	header-00..60	M_BANKS:Hxx:Exxxx	61-entry 32-bit header; 56 non-null fixed 256x16-bit bank-relative pointer tables	14336 runtime slots; 14105 token-terminated; 1624 consumer-bounded closure targets	FF when present in runtime window	custom-variable-byte	MAP 0x4DB28/0x4DD00 runtime reader; C4-CC display-record VM fields; SC_00/04/05 proven roots; FB nested selector	runtime-slots-inventoried_consumer-bounded-closure-1624_full-cfg-open_charmap-target-validation
