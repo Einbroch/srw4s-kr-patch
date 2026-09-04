@@ -67,10 +67,25 @@ def quote(s):
     return (a, b, s[a + 1:b]) if 0 <= a < b else None
 
 
-def relocate(data, records, allrecords, FULL, enc, encode, WHOLE=None):
-    """data(bytearray)를 제자리에서 고친다. (옮긴 개수, 못 옮긴 id들) 반환."""
+def relocate(data, records, allrecords, FULL, enc, encode, WHOLE=None, ext=None):
+    """data(bytearray)를 제자리에서 고친다. (옮긴 개수, 못 옮긴 id들) 반환.
+
+    `ext=(lo, hi, blob_len)` 를 주면 블롭 **밖** 구간까지 쓸 수 있다. 뱅크 표 슬롯이
+    u16 이라 블롭 시작에서 65,535 까지 가리킬 수 있고, M_BANKB 해제물(55,353 B) 뒤는
+    BATTLE 오버레이 이미지다. 실기 읽기 브레이크포인트(512 B x 43 조각, `readbp.lua`)로
+    **0x801155C5 이후는 전투 중 한 번도 안 읽힌다**고 확인했다 — 읽힌 조각은 M_BANKB
+    끝에 붙은 첫 512 B 뿐이고, 그것도 커널 적재 루틴의 워드 정렬 넘침이었다.
+    그래서 그 512 B 는 여백으로 비켜 두고 `[lo, hi)` 만 빈자리로 쓴다.
+    `data` 는 blob_len 보다 긴 버퍼여야 하며, blob_len 뒤쪽은 호출자가
+    BATTLE 오버레이에 따로 써 넣는다.
+    """
     d = bytes(data)
     cover = bytearray(len(d))
+    if ext:
+        _lo, _hi, _blob = ext
+        for j in range(_blob, len(d)):          # 확장 구간 밖은 전부 산 자리로 본다
+            if not (_lo <= j < _hi):
+                cover[j] = 1
     for i in range(244):
         cover[i] = 1
     hdr = list(struct.unpack_from("<61I", d, 0))

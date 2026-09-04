@@ -27,6 +27,14 @@ LEDGER = ROOT / "translation" / "mbanks_ledger.json"
 WINDOW = 0x400
 
 
+SPEAKER: dict = {}
+try:
+    import runpy as _rp
+    SPEAKER = _rp.run_path(str(ROOT / "translation" / "mbanks_speaker_fix.py"))["SPEAKER"]
+except Exception:
+    pass
+
+
 def main() -> int:
     d = SRC.read_bytes()
     L = json.loads(LEDGER.read_text(encoding="utf-8"))
@@ -101,6 +109,13 @@ def main() -> int:
                 a, b = s.rfind("「"), s.rfind("」")
                 return (s[:a + 1], s[b:]) if 0 <= a < b else None
             oj, ok_ = _out(r["jp"]), _out(r["ko"])
+            # 「 바로 앞의 화자 이름은 표가 아니라 화면에 나오는 글자다.
+            # 선언한 치환(translation/mbanks_speaker_fix.py)만 예외로 허용한다 —
+            # 적지 않은 변경은 그대로 실패한다.
+            if oj != ok_ and r["id"] in SPEAKER:
+                jp_nm, ko_nm = SPEAKER[r["id"]]
+                if oj and oj[0].endswith(jp_nm + "「"):
+                    oj = (oj[0][:-len(jp_nm) - 1] + ko_nm + "「", oj[1])
             if oj != ok_:
                 err["data_prefix"].append(f"{r['id']} 「」 밖이 원문과 다르다")
             i, j = r["ko"].rfind("「"), r["ko"].rfind("」")
