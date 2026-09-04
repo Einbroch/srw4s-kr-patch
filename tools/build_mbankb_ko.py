@@ -165,6 +165,86 @@ def main() -> int:
             return 1
         print(f"표 밖 전투 대사: {hn}개 교체")
 
+    # --- 이름표: **길이를 바꾸지 않고** 제자리 치환만 한다 ---
+    # 이 표는 이름뿐 아니라 초상화/CLUT 인덱스까지 담고 항목의 **위치가 곧 의미**다.
+    # 늘리려고 세 번 시도해 세 번 다 깨졌다(확장 구간으로 이동 -> 글자 쓰레기,
+    # 블롭 안에서 확장 -> 대사 사라짐 + 초상화 깨짐). 그래서 **원문과 같은 바이트 수**로만
+    # 바꾼다. `一矢`(4 B)에는 한글 2자(4 B)가 들어간다 — `카즈`.
+    # 반각(1바이트) 글리프로 3자를 넣는 길도 막혔다: 0x01~0xEF 240칸이 전부 쓰이고 있다.
+    # 2026-09-05 — `카즈` 로 넣었다가 사용자 판단으로 원문 유지. 두 자로 자른 이름보다
+    #   일본어 원문이 낫다고 봤다. 맵 대사에서는 `카즈야` 로 제대로 나온다.
+    #   다시 넣으려면 아래 튜플에 ("一矢", "카즈") 를 넣으면 된다 (길이가 같아야 한다).
+    for _jp, _ko in ():
+        _pj, _pk = encode(_jp, enc)[:-1], encode(_ko, enc)[:-1]
+        assert len(_pj) == len(_pk), (_jp, _ko)
+        _n = 0
+        _i = 0
+        while True:
+            _i = bytes(data).find(_pj, _i)
+            if _i < 0:
+                break
+            data[_i:_i + len(_pk)] = _pk
+            _n += 1
+            _i += len(_pk)
+        if _n:
+            print(f"이름표 제자리 치환: {_jp} -> {_ko}  {_n}곳 ({len(_pj)}B 그대로)")
+
+    # --- (보류) 이름표 확장 ---
+    # 이름표는 2차 해제본(0x801A6878)에서 읽히므로 확장 구간에 놓으면 안 된다.
+    if os.environ.get("SRW4S_MB_NOEXT") != "1":
+        from mbankb_nametable import run as nt_run, verify as nt_verify, rec_end as nt_end
+        from mbankb_reloc import _nslots as _ns2
+        recs2 = {r["id"]: r for r in doc["records"]}
+        hdr2 = list(struct.unpack_from("<61I", bytes(data), 0))
+        slots2, cov = [], bytearray(len(data))
+        for i in range(244):
+            cov[i] = 1
+        for off in [o for o in hdr2 if o and o + 0x200 <= len(data)]:
+            for k in range(_ns2(bytes(data), off)):
+                v = struct.unpack_from("<H", data, off + 2 * k)[0]
+                slots2.append((off, k, v))
+                cov[off + 2 * k] = cov[off + 2 * k + 1] = 1
+        _hid = ROOT / "translation" / "mbankb_hidden_ledger.json"
+        _all = list(doc["records"])
+        if _hid.exists():
+            _all += json.loads(_hid.read_text(encoding="utf-8"))["records"]
+        for r in _all:
+            for j in range(r["offset"], min(r["end"], len(data))):
+                cov[j] = 1
+        for _t, _k, v in slots2:
+            if v < len(data):
+                for j in range(v, nt_end(bytes(data), v)):
+                    cov[j] = 1
+        holes, i = [], 0
+        while i < len(cov):
+            if not cov[i]:
+                k = i
+                while k < len(cov) and not cov[k]:
+                    k += 1
+                holes.append([i, k - i])
+                i = k
+            else:
+                i += 1
+        holes.sort(key=lambda h: -h[1])
+        # 2026-09-05 되돌림 — **이 표는 길이를 못 바꾼다.**
+        #   블롭 안에서 늘리고 안쪽 슬롯 27개를 이동 전/후 바이트열로 직접 대조해
+        #   통과했는데도, 실기에서 전투 대사가 통째로 비고 **초상화까지 깨졌다**.
+        #   초상화가 깨진다는 건 이 표가 이름만이 아니라 초상화/CLUT 인덱스도 담고
+        #   있고, **항목의 위치 자체가 의미**라는 뜻이다(슬롯이 아니라 순번으로 읽는다).
+        #   바이트를 한 개라도 끼워 넣으면 그 뒤 항목이 전부 어긋난다.
+        #   -> 이름을 바꾸려면 **원문과 정확히 같은 바이트 수**여야 한다. `一矢`(4 B)에는
+        #      한글 2자(4 B)만 들어간다.
+        PLAN: list = []
+        snap = bytes(data)
+        ok2, bad2, chk2 = nt_run(data, slots2, recs2, PLAN, holes, encode, enc)
+        errs = nt_verify(snap, bytes(data), chk2,
+                         [(encode("一矢", enc)[:-1], encode("카즈야", enc)[:-1])])
+        if bad2 or errs:
+            for e in (bad2 + errs)[:6]:
+                print("FAIL 이름표:", e)
+            return 1
+        print(f"이름표 {ok2}개 확장 / 슬롯 {len(chk2)}개 재연결 / 이동 전후 직접 대조 통과")
+
     # --- 레코드 재배치 ---
     reloc = ROOT / "translation" / "mbankb_relocate_ko.py"
     if reloc.exists() and NOEXT:
@@ -197,33 +277,6 @@ def main() -> int:
         data[:] = buf[:blob]
         extbytes = bytearray(buf[blob:])
 
-        # --- 이름표: 확장 구간에 이어서 놓고 안쪽 슬롯까지 다시 잇는다 ---
-        from mbankb_nametable import apply as nt_apply, verify as nt_verify
-        NAME_SUBS = {"BB:0AA2D": [("一矢", "카즈야")], "BB:0ABC1": [("一矢", "카즈야")]}
-        recs = {r["id"]: r for r in doc["records"]}
-        hdr2 = list(struct.unpack_from("<61I", bytes(data), 0))
-        slots = []
-        for off in [o for o in hdr2 if o and o + 0x200 <= len(data)]:
-            from mbankb_reloc import _nslots as _ns
-            for k in range(_ns(bytes(data), off)):
-                slots.append((off, k, struct.unpack_from("<H", data, off + 2 * k)[0]))
-        merged = bytearray(data) + extbytes
-        before = bytes(merged)
-        used_to = blob + (EXT_LO - blob)
-        # 이미 쓴 확장 구간 뒤부터 놓는다
-        tailfree = EXT_LO + max((i + 1 for i in range(EXT_LO - blob, len(extbytes))
-                                 if extbytes[i] != tail[i]), default=EXT_LO - blob) - (EXT_LO - blob)
-        mv2, bad2, nxt, checks = nt_apply(merged, slots, recs, NAME_SUBS,
-                                          tailfree, EXT_END, encode, enc)
-        subs_b = [(encode("一矢", enc)[:-1], encode("카즈야", enc)[:-1])]
-        errs = nt_verify(before, bytes(merged), checks, subs_b)
-        if bad2 or errs:
-            for e in (bad2 + errs)[:6]:
-                print("FAIL 이름표:", e)
-            return 1
-        print(f"  이름표 {mv2}개 이동 / 안쪽 슬롯 {len(checks)}개 재연결 / 독립 대조 통과")
-        data[:] = merged[:blob]
-        extbytes = bytes(merged[blob:])
         used = sum(1 for i, (a, b) in enumerate(zip(tail, extbytes)) if a != b)
         OUT_EXT.write_bytes(extbytes)
         print(f"레코드 재배치: {mv}개" + (f" / 자리 없음 {len(nofit)}개" if nofit else ""))

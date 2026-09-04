@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""M_BANKB 이름표 레코드를 옮기면서 **안쪽 슬롯까지 다시 잇는다**.
+"""M_BANKB 이름표를 **블롭 안에서** 늘린다.
 
-전투 화면의 화자 이름은 `{C:0F}` + 색인 2바이트로 불려 오고, 그 실체는 M_BANKB 안의
-표 레코드다 (`{C:07}` + 색인 + 이름). 이 레코드들은 **항목마다 슬롯이 따로 가리켜**
-(`BB:0AA2D` 19개, `BB:0ABC1` 6개) 일반 재배치 도구가 손대지 못한다.
+전투 화면의 화자 이름은 M_BANKB 안 표 레코드(`{C:07}` + 색인 2B + 이름)에서 온다.
+문제는 게임이 블롭을 **두 번** 푼다는 것이다.
 
-이름을 늘리면(`一矢` 4 B -> `카즈야` 6 B) 그 뒤 항목이 전부 밀리므로, 슬롯마다
-**자기 앞에서 늘어난 만큼**을 더해 준다. 레코드는 확장 구간으로 통째로 옮긴다.
+    0x80107B8C   1차 해제본 — 무기 구호 등이 여기서 읽힌다
+    0x801A6878   2차 해제본 — BATTLE 오버레이가 전투 시작 때 다시 푼다.
+                 **이름표와 컷인 대사는 여기서 읽힌다** (실기 읽기 BP 로 확정)
 
-**독립 검증**(2026-09-05 교훈): 옮긴 뒤 슬롯이 가리키는 바이트열을, 옮기기 **전**
-같은 슬롯이 가리키던 바이트열과 직접 대조한다. 재매핑 로직으로 기대값을 만들지 않는다 —
-그렇게 하면 틀린 계산을 정답으로 삼아 자기 자신과 대조하게 된다.
+2차 해제본은 블롭 55,353 B 만 담는다. 그래서 이름표를 **확장 구간(블롭 밖)으로
+옮기면 2차 해제본에 그 자리가 없어** 화면이 글자 쓰레기가 된다 (2026-09-05 실측).
+확장 구간은 1차 해제본만 읽는 레코드에만 쓸 수 있다.
+
+그래서 여기서는 **블롭 안에서만** 자리를 만든다.
+
+  1. 이름표에 붙은 이웃(안쪽 슬롯이 없어 옮길 수 있는 것)을 블롭 안 구멍으로 옮긴다
+  2. 이름표를 그 자리로 늘린다 — 뒤로 늘리거나(시작 고정), 앞으로 밀거나(시작 이동)
+  3. 안쪽 슬롯은 **자기 앞에서 늘어난 만큼** 더한다 (시작이 옮겨졌으면 그만큼도)
+
+검증은 옮기기 **전/후 바이트열을 직접 대조**한다. 재매핑 로직으로 기대값을 만들면
+틀린 계산을 정답으로 삼게 된다 (2026-09-05 교훈).
 """
 from __future__ import annotations
 import struct
@@ -37,17 +46,41 @@ def rec_end(d, p):
     return len(d)
 
 
-def apply(data, slots, recs, subs, lo, hi, encode, enc):
-    """data(bytearray) 를 고친다. subs = {rec_id: [(원문, 역문), ...]}.
-    slots = [(표오프셋, 칸번호, 값)]. 반환: (옮긴 레코드 수, 실패 목록, 다음 빈자리)."""
-    at = lo
-    moved, fail, checks = 0, [], []
-    for rid, pairs in subs.items():
-        r = recs[rid]
-        old = bytes(data[r["offset"]:r["end"]])
+def _setslot(data, slots, old, new):
+    n = 0
+    for t, k, v in slots:
+        if v == old:
+            struct.pack_into("<H", data, t + 2 * k, new)
+            n += 1
+    return n
+
+
+def run(data, slots, recs, plan, holes, encode, enc, log=print):
+    """plan = [(이름표id, 이웃id, 방향, [(원문,역문)])]  방향: 'after' | 'before'.
+    holes = [[시작, 길이], ...] (블롭 안). 반환 (성공수, 실패목록, 검사목록)."""
+    before = bytes(data)
+    done, fail, checks = 0, [], []
+    for tid, nid, side, pairs in plan:
+        t, nb = recs[tid], recs[nid]
+        nlen = nb["end"] - nb["offset"]
+        spot = next((h for h in holes if h[1] >= nlen), None)
+        if spot is None:
+            fail.append((tid, f"이웃 {nid} ({nlen}B) 를 받을 구멍이 없다"))
+            continue
+        # 1) 이웃을 구멍으로
+        at = spot[0]
+        data[at:at + nlen] = data[nb["offset"]:nb["end"]]
+        if _setslot(data, slots, nb["offset"], at) != 1:
+            fail.append((tid, f"이웃 {nid} 슬롯이 1개가 아니다"))
+            continue
+        checks.append((nb["offset"], at))
+        spot[0] += nlen
+        spot[1] -= nlen
+
+        # 2) 이름표를 늘린다
+        old = bytes(before[t["offset"]:t["end"]])
         new = bytearray(old)
-        # 뒤에서부터 바꿔야 앞쪽 오프셋이 안 흔들린다
-        marks = []          # (원본오프셋, 늘어난바이트)
+        marks = []
         for jp, ko in pairs:
             pj, pk = encode(jp, enc)[:-1], encode(ko, enc)[:-1]
             i = 0
@@ -64,31 +97,34 @@ def apply(data, slots, recs, subs, lo, hi, encode, enc):
                 if bytes(new[i:i + len(pj)]) == pj:
                     new[i:i + len(pj)] = pk
                     break
-        if at + len(new) > hi:
-            fail.append((rid, "확장 구간 부족"))
+        grow = sum(g for _, g in marks)
+        ns = t["offset"] if side == "after" else t["offset"] - grow
+        if side == "before" and ns < nb["offset"]:
+            fail.append((tid, "앞쪽 자리가 모자라다"))
             continue
-        # 안쪽 슬롯: 자기 앞에서 늘어난 만큼 더한다
-        def newoff(rel):
-            return at + rel + sum(g for m, g in marks if m < rel)
-        data[at:at + len(new)] = new
-        for si, (t, k, v) in enumerate(slots):
-            if r["offset"] <= v < r["end"]:
-                nv = newoff(v - r["offset"])
-                struct.pack_into("<H", data, t + 2 * k, nv)
-                checks.append((v, nv, r["offset"], at))
-        moved += 1
-        at += len(new)
-    return moved, fail, at, checks
+        data[ns:ns + len(new)] = new
+        if side == "before" and _setslot(data, slots, t["offset"], ns) < 1:
+            fail.append((tid, "이름표 자기 슬롯을 못 찾았다"))
+            continue
+        for si, (tb, k, v) in enumerate(slots):
+            if t["offset"] < v < t["end"]:
+                rel = v - t["offset"]
+                nv = ns + rel + sum(g for m, g in marks if m < rel)
+                struct.pack_into("<H", data, tb + 2 * k, nv)
+                checks.append((v, nv))
+        log(f"  {tid} {side} {grow:+d}B  (이웃 {nid} -> 0x{at:05X})")
+        done += 1
+    return done, fail, checks
 
 
 def verify(before, after, checks, subs_bytes):
-    """옮기기 전/후를 **직접 대조**한다. 재매핑 로직을 다시 쓰지 않는다."""
+    """옮기기 전/후 바이트열 직접 대조. 재매핑 로직을 다시 쓰지 않는다."""
     bad = []
-    for ov, nv, _ro, _at in checks:
+    for ov, nv in checks:
         a = before[ov:rec_end(before, ov)]
         b = after[nv:rec_end(after, nv)]
         for pj, pk in subs_bytes:
             a = a.replace(pj, pk)
         if a != b:
-            bad.append((ov, nv, a[:24].hex(" "), b[:24].hex(" ")))
+            bad.append((hex(ov), hex(nv), a[:20].hex(" "), b[:20].hex(" ")))
     return bad
