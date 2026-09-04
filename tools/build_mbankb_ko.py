@@ -165,7 +165,34 @@ def main() -> int:
             return 1
         print(f"표 밖 전투 대사: {hn}개 교체")
 
-    # --- 이름표: **길이를 바꾸지 않고** 제자리 치환만 한다 ---
+    # --- 전투 화자 이름: 늘리고 **점프 s16 을 보정한다** ---
+    # 자세한 근거는 tools/mbankb_jumpfix.py 머리말.
+    from mbankb_jumpfix import grow_names, targets
+    NAME_GROW = [
+        # (레코드 시작, 레코드 끝, [(레코드내 오프셋, 원문 바이트수, 새 이름)], 새 꼬리)
+        # **마지막 이름만** 늘릴 수 있다. 호출자는 이름 자리로 고정 오프셋으로
+        # 진입하므로, 앞 이름을 늘리면 뒤 이름의 진입점이 밀려 앞 점프의 오프셋
+        # 바이트가 글자로 찍힌다(2026-09-05 실측: `とF카즈야「…」`).
+        ("BB:0ABC1", [(56, 4, "카즈야")], "「에잇!」"),   # 「에잇!! 」 에서 2 B 확보
+    ]
+    _byid = {r["id"]: r for r in doc["records"]}
+    for rid, names, tail in NAME_GROW:
+        r = _byid[rid]
+        old = bytes(data[r["offset"]:r["end"]])
+        new, grown = grow_names(old, names, tail, encode, enc)
+        if len(new) != len(old):
+            print(f"FAIL {rid}: 길이 {len(old)} -> {len(new)}")
+            return 1
+        a, b = targets(old, r["offset"]), targets(new, r["offset"])
+        if a != b:
+            print(f"FAIL {rid}: 점프 대상이 달라졌다")
+            print("  전", [hex(x) for x in a])
+            print("  후", [hex(x) for x in b])
+            return 1
+        data[r["offset"]:r["end"]] = new
+        print(f"화자 이름 {rid}: {len(names)}개 늘림(+{grown}B) / 점프 {len(a)}개 대상 그대로")
+
+    # --- (보류) 길이 불변 제자리 치환 ---
     # 이 표는 이름뿐 아니라 초상화/CLUT 인덱스까지 담고 항목의 **위치가 곧 의미**다.
     # 늘리려고 세 번 시도해 세 번 다 깨졌다(확장 구간으로 이동 -> 글자 쓰레기,
     # 블롭 안에서 확장 -> 대사 사라짐 + 초상화 깨짐). 그래서 **원문과 같은 바이트 수**로만
