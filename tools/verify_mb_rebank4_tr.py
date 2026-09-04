@@ -80,6 +80,14 @@ def main() -> int:
                 # 구조 경계에 붙은 별칭은 역문의 같은 자리를 읽어야 한다
                 want[int(a, 16)] = nb[kmap[rel]:]
 
+    # 슬롯이 아니라 스크립트 점프로만 도달하는 레코드 (mb_rebank4.KEEP_PATCH).
+    # 원장에 없으므로 여기서 기대값을 따로 넣어 준다.
+    from mb_rebank4 import KEEP_PATCH
+    for t, ko in KEEP_PATCH.items():
+        e = o.find(bytes([0xFF]), t) + 1
+        nb = encode(ko, enc)
+        want[t] = nb + bytes(e - t - len(nb))
+
     # 포인터가 레코드 **직전**을 가리켜 그대로 읽어 들어가는 경우가 있다.
     # 그때 새 내용은 `원본 앞머리 + 그 레코드의 역문` 이어야 한다.
     heads = sorted(want)

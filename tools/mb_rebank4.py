@@ -31,11 +31,43 @@ SRC = ROOT / "extract" / "DAT" / "M_BANKS.BIN"
 LEDGER = ROOT / "translation" / "mbanks_ledger.json"
 ARITY = {0xF6: 0, 0xF7: 0, 0xF8: 1, 0xF9: 1, 0xFA: 0, 0xFB: 2, 0xFC: 2, 0xFD: 2, 0xFE: 1}
 LIMIT = 0x10000
+
+# **원본 배치를 그대로 보존해야 하는 뱅크.**
+# 맵 스크립트는 레코드 사이를 `s16` 상대 오프셋으로 건너뛴다(MAP 0x801525E8 등).
+# 런을 병합해 다시 채우면 레코드 간 거리가 바뀌어 그 점프가 엉뚱한 데로 간다 —
+# 전함 발진에서 게임이 에러 트랩(무한 루프)에 빠졌다.
+# 이 뱅크들은 원본 구간을 통째로 복사하고, 역문은 **원문 길이 안에서 제자리 치환**한다
+# (남는 자리는 0으로 채운다 — 종결자 뒤라 화면에 안 나온다).
+# 슬롯은 전부 같은 상수만큼 옮기므로 상대 거리가 보존된다.
+KEEP_LAYOUT = {30}
+
+# **슬롯이 아니라 스크립트 점프로만 도달하는 레코드.**
+# 원장은 표 슬롯이 가리키는 것만 담으므로 이것들은 추출조차 안 됐고, 화면에는
+# 일본어로 떴다(발진 대사). 배치 보존 뱅크 안에 있으니 원문 길이 안에서 제자리 치환한다.
+KEEP_PATCH = {
+    0x0CE39: "{C:05}「{C:06} 발진!」",
+    0x0CE52: "{C:05}「{C:06} 고!」",
+    0x0CFEB: "「{C:06} 가요!」",
+    0x0CFF6: "「{C:06} 간다!」",
+    0x0D001: "「{C:06} 갑니다!」",
+    0x0D00F: "「{C:06}갈까」",
+    0x0D018: "「{C:06} 갑니다」",
+    0x0D024: "「{C:06}간다」",
+    0x0D02D: "「{C:06} 발진!!」",
+    0x0D058: "「{C:06} 가요!」",
+    0x0D063: "「{C:06} 간다!」",
+    0x0D06E: "「{C:06} 갑니다!」",
+    0x0D07C: "「{C:06}갈까」",
+    0x0D085: "「{C:06} 갑니다」",
+    0x0D091: "「{C:06}간다」",
+    0x0D09A: "「{C:06} 발진!!」",
+}
 INNER: dict[int, list[tuple[int, bool]]] = {}
 ALIAS_TR: dict[int, tuple[bytes, int]] = {}
 ALIAS_PARENT: dict[int, int] = {}
 ALIAS_KO: dict[int, tuple[bytes, int]] = {}
 TRANS: dict = {}
+ENC: dict = {}
 
 
 def tok_end(d: bytes, s: int):
@@ -65,6 +97,7 @@ def load_translations(d: bytes, targets: set[int]):
     """
     from mb_codec import build_encoder, encode
     from mb_alias import ko_alias_offsets
+    global ENC
     L = json.loads(LEDGER.read_text(encoding="utf-8"))
     enc = build_encoder()
     out, inner, alias_tr, parent, alias_ko, skip, nal = {}, {}, {}, {}, {}, 0, 0
@@ -100,6 +133,8 @@ def load_translations(d: bytes, targets: set[int]):
                     # (H04:E0000 -> 0x05189). 그때도 역문을 읽게 하려면 따로 등록해야 한다.
                     alias_tr[x] = (nb[rel:], len(raw) - rel)
             nal += len(q)
+    global ENC
+    ENC = enc
     print(f"번역 적용 대상 {len(out)}개 / 인코딩 불가로 제외 {skip}")
     print(f"  별칭 포인터 {nal}개 ({len(inner)}개 레코드) -> 원문 접미사 사본으로 보존")
     print(f"  그중 {len(alias_ko)}개는 역문의 같은 구조 자리로 옮긴다")
@@ -107,6 +142,7 @@ def load_translations(d: bytes, targets: set[int]):
 
 
 def main() -> int:
+    from mb_codec import encode
     d = SRC.read_bytes()
     first = struct.unpack_from("<I", d, 0)[0]
     offs = list(struct.unpack_from(f"<{first // 4}I", d, 0))
@@ -142,6 +178,39 @@ def main() -> int:
                 runs[-1][1] = max(runs[-1][1], b)
             else:
                 runs.append([a, b])
+        if bi in KEEP_LAYOUT:
+            lo = min(a for a, _b in rs)
+            hi = max(b for _a, b in rs)
+            blk = len(out)
+            header[bi] = blk
+            out += bytes(0x200)              # 표는 블록 맨 앞
+            body = bytearray(d[lo:hi])
+            for t, ko in KEEP_PATCH.items():
+                if not (lo <= t < hi):
+                    continue
+                e = d.find(bytes([0xFF]), t) + 1
+                nb = encode(ko, ENC)
+                if len(nb) > e - t:
+                    print(f"FAIL: 0x{t:X} 역문 {len(nb)}B > 원문 {e - t}B")
+                    return 1
+                body[t - lo:t - lo + (e - t)] = nb + bytes(e - t - len(nb))
+            for t, (nb, olen) in TRANS.items():
+                if lo <= t and t + olen <= hi:
+                    if len(nb) > olen:
+                        print(f"FAIL: 표{bi} 0x{t:X} 역문 {len(nb)}B > 원문 {olen}B "
+                              f"(배치 보존 뱅크는 원문 안에 들어가야 한다)")
+                        return 1
+                    body[t - lo:t - lo + olen] = nb + bytes(olen - len(nb))
+            out += body
+            new = [0] * 256
+            for k, rel in enumerate(rels):
+                t = base + rel
+                new[k] = (t - lo + 0x200) if lo <= t < hi else 0
+            struct.pack_into("<256H", out, blk, *new)
+            worst = max(worst, len(out) - blk)
+            print(f"  표{bi}: 원본 배치 보존 ({hi - lo:,}B, 슬롯 상대거리 유지)")
+            continue
+
         blk = len(out)
         header[bi] = blk
         out += bytes(0x200)                  # 표는 블록 맨 앞
