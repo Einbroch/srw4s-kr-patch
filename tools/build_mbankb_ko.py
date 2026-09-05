@@ -173,13 +173,23 @@ def main() -> int:
         # **마지막 이름만** 늘릴 수 있다. 호출자는 이름 자리로 고정 오프셋으로
         # 진입하므로, 앞 이름을 늘리면 뒤 이름의 진입점이 밀려 앞 점프의 오프셋
         # 바이트가 글자로 찍힌다(2026-09-05 실측: `とF카즈야「…」`).
-        ("BB:0ABC1", [(56, 4, "카즈야")], "「에잇!」"),   # 「에잇!! 」 에서 2 B 확보
+        # 이름은 [오프셋, 원문 바이트수, 새 이름]. 꼬리 대사를 줄여 레코드 길이를 맞춘다.
+        # 洸 -> 아키라 는 +4 라 이 레코드에는 자리가 없다(꼬리가 「엣」 이 한계).
+        ("BB:0ABC1", [(19, 5, "개리슨"), (48, 4, "카즈야"), (56, 4, "카즈야")], "「엣」"),
+        ("BB:0AA2D", [(54, 4, "카즈야")], "「공격 불가!」"),
     ]
     _byid = {r["id"]: r for r in doc["records"]}
     for rid, names, tail in NAME_GROW:
         r = _byid[rid]
         old = bytes(data[r["offset"]:r["end"]])
-        new, grown = grow_names(old, names, tail, encode, enc)
+        _hdr = list(struct.unpack_from("<61I", bytes(data), 0))
+        from mbankb_reloc import _nslots as _ns3
+        _sl = []
+        for _off in [o for o in _hdr if o and o + 0x200 <= len(data)]:
+            for _k in range(_ns3(bytes(data), _off)):
+                _sl.append((_off, _k, struct.unpack_from("<H", data, _off + 2 * _k)[0]))
+        new, grown = grow_names(old, names, tail, encode, enc,
+                                slots=_sl, rec_off=r["offset"], data=data)
         if len(new) != len(old):
             print(f"FAIL {rid}: 길이 {len(old)} -> {len(new)}")
             return 1

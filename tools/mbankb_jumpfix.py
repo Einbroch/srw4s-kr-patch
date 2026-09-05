@@ -45,7 +45,7 @@ def targets(buf, base):
     return out
 
 
-def grow_names(old, names, tail, encode, enc):
+def grow_names(old, names, tail, encode, enc, slots=None, rec_off=0, data=None):
     """old(레코드 바이트)에서 names=[(오프셋, 원문바이트수, 새이름)] 를 늘리고,
     **그 뒤에 오는 점프의 s16 을 그 시점까지 늘어난 만큼** 빼 준다.
     tail 로 꼬리를 갈아 레코드 길이를 원래대로 맞춘다.
@@ -70,6 +70,19 @@ def grow_names(old, names, tail, encode, enc):
             continue
         new += old[p:p + 1]
         p += 1
+    # 이름 진입점은 **뱅크 표 슬롯**이다 (블롭 안 오프셋을 u16 으로 가리킨다).
+    # 이름을 늘리면 그 뒤 진입점이 밀리므로 슬롯도 같이 옮겨야 한다.
+    # 안 옮기면 진입점이 앞 점프의 오프셋 바이트를 가리켜 그게 글자로 찍힌다
+    # (실측: `とF카즈야「…」`).
+    if slots is not None and data is not None:
+        for tb, k, v in slots:
+            rel = v - rec_off
+            if 0 <= rel < len(old):
+                shift = sum(len(encode(ko, enc)) - 1 - ol
+                            for o2, ol, ko in names if o2 < rel)
+                if shift:
+                    struct.pack_into("<H", data, tb + 2 * k, v + shift)
+
     i = bytes(new).rfind(encode("「", enc)[:-1])
     if i < 0:
         raise ValueError("꼬리의 여는 따옴표를 못 찾았다")
