@@ -88,3 +88,38 @@ def grow_names(old, names, tail, encode, enc, slots=None, rec_off=0, data=None):
         raise ValueError("꼬리의 여는 따옴표를 못 찾았다")
     new = new[:i] + encode(tail, enc)
     return bytes(new), grown
+
+
+def move_and_grow(old, rec_off, new_off, names, encode, enc):
+    """레코드를 new_off 로 **옮기면서** 이름을 늘린다.
+
+    블롭을 키워 뒤에 빈자리를 만들면(2차 해제본의 64 KB 슬롯 남는 부분) 레코드를
+    통째로 옮길 수 있고, 그러면 꼬리 대사를 깎지 않고도 이름을 마음껏 늘린다.
+
+    점프는 **대상 절대 주소를 그대로 두고** s16 을 다시 계산한다
+    (레코드가 움직였으므로 원래 s16 을 그대로 쓰면 안 된다).
+    반환 (새 바이트, 슬롯 재배치표 {옛 절대오프셋: 새 절대오프셋}).
+    """
+    subs = {off: (ol, ko) for off, ol, ko in names}
+    tgts = {}                       # 새 버퍼에서의 점프 위치 -> 대상 절대 주소
+    new, grown, p = bytearray(), 0, 0
+    remap = {}
+    while p < len(old):
+        remap[rec_off + p] = new_off + len(new)
+        if p in subs:
+            ol, ko = subs[p]
+            new += encode(ko, enc)[:-1]
+            grown += len(encode(ko, enc)) - 1 - ol
+            p += ol
+            continue
+        if old[p] == 0xFC and p + 3 < len(old) and old[p + 1] in JUMP_SUB:
+            s16 = struct.unpack_from("<h", old, p + 2)[0]
+            tgts[len(new) + 2] = rec_off + (p + 2) + s16
+            new += old[p:p + 4]
+            p += 4
+            continue
+        new += old[p:p + 1]
+        p += 1
+    for at, tgt in tgts.items():
+        struct.pack_into("<h", new, at, tgt - (new_off + at))
+    return bytes(new), remap, grown

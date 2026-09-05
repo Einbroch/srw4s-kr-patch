@@ -175,8 +175,12 @@ def main() -> int:
         # 바이트가 글자로 찍힌다(2026-09-05 실측: `とF카즈야「…」`).
         # 이름은 [오프셋, 원문 바이트수, 새 이름]. 꼬리 대사를 줄여 레코드 길이를 맞춘다.
         # 洸 -> 아키라 는 +4 라 이 레코드에는 자리가 없다(꼬리가 「엣」 이 한계).
-        ("BB:0ABC1", [(19, 5, "개리슨"), (48, 4, "카즈야"), (56, 4, "카즈야")], "「엣」"),
-        ("BB:0AA2D", [(54, 4, "카즈야")], "「공격 불가!」"),
+        # 2026-09-05 **전면 보류.** 이름을 늘리면 슬롯·점프를 다 맞춰도 인접 대사의
+        #   진입이 어긋난다. `카즈야Lケ「안맞아!」` 처럼 `{C:0F}` 뒤 색인 2바이트가
+        #   글자로 찍힌다. v0.99e/f 에 이 결함이 들어간 채 배포됐다.
+        #   슬롯(뱅크 표)과 점프(s16) 말고 **세 번째로 위치에 의존하는 것**이 있다.
+        #   그것을 찾기 전에는 길이를 바꾸지 않는다 — 같은 길이 치환만 안전하다
+        #   (효마·반죠는 그래서 유지).
     ]
     _byid = {r["id"]: r for r in doc["records"]}
     for rid, names, tail in NAME_GROW:
@@ -282,6 +286,56 @@ def main() -> int:
             return 1
         print(f"이름표 {ok2}개 확장 / 슬롯 {len(chk2)}개 재연결 / 이동 전후 직접 대조 통과")
 
+    # --- 블롭을 키워 이름 레코드를 옮긴다 ---
+    # 2차 해제본은 64 KB 슬롯에 들어가고(코드: dest / dest+0x10000 / dest+0x20000)
+    # M_BANKB 는 55,353 B 만 쓴다. 남는 10,183 B 는 u16 슬롯 한계와 거의 일치한다.
+    # 거기로 레코드를 옮기면 꼬리 대사를 깎지 않고 이름을 온전히 넣을 수 있다.
+    # C_BEFCT(맵 경로)는 이 확장을 쓰지 않으므로 무확장판을 따로 만든다.
+    if os.environ.get("SRW4S_MB_NOEXT") != "1":
+        from mbankb_jumpfix import move_and_grow, targets as _tg
+        # 2026-09-05 보류 — 블롭을 55,440 B 로 키우고 이 레코드를 옮겼더니, 점프 124개
+        #   대상 전부 일치·슬롯 전부 정상인데도 적 턴 피격 대사가
+        #   `카즈야Fケ「우옷!!」` 처럼 떴다(= `{C:0F}` 뒤 색인 2바이트가 글자로 찍힘).
+        #   데이터 불변식은 다 지켜졌으므로 원인이 데이터 밖에 있다 — 블롭 크기 자체를
+        #   전제하는 코드가 어딘가 있는 것으로 보인다. 규명 전까지 확장은 쓰지 않는다.
+        MOVE_GROW: list = []
+        # --- 단일 변수 시험: **블롭만 키우고 레코드는 그대로** ---
+        # 지난 시도엔 (a) 블롭 확장 (b) 레코드 이동 이 섞여 있었다. 어느 쪽이 화면을
+        # 깨뜨렸는지 가르려면 (a) 만 해 본다. 아무 데도 안 쓰이는 0 을 뒤에 붙여
+        # 해제물 크기만 늘린다. 이게 멀쩡하면 원인은 (b) 다.
+        _pad = int(os.environ.get("SRW4S_MB_PAD", "0"))
+        if _pad:
+            data += bytes(_pad)
+            print(f"블롭 크기 시험: {len(orig):,} -> {len(data):,} B (0 {_pad}B 덧붙임)")
+        BLOB_MAX = 65535                     # u16 슬롯 한계
+        for rid, names in MOVE_GROW:
+            r = _byid[rid]
+            old = bytes(data[r["offset"]:r["end"]])
+            at = len(data)
+            new, remap, grown = move_and_grow(old, r["offset"], at, names, encode, enc)
+            if at + len(new) > BLOB_MAX:
+                print(f"FAIL {rid}: 확장이 u16 한계를 넘는다 ({at + len(new)} > {BLOB_MAX})")
+                return 1
+            data += new
+            a, b = _tg(old, r["offset"]), _tg(new, at)
+            if a != b:
+                print(f"FAIL {rid}: 점프 대상이 달라졌다")
+                print("  전", [hex(x) for x in a]); print("  후", [hex(x) for x in b])
+                return 1
+            hdr3 = list(struct.unpack_from("<61I", bytes(data), 0))
+            from mbankb_reloc import _nslots as _ns4
+            moved = 0
+            for off in [o for o in hdr3 if o and o + 0x200 <= len(data)]:
+                for k in range(_ns4(bytes(data), off)):
+                    v = struct.unpack_from("<H", data, off + 2 * k)[0]
+                    if v in remap:
+                        struct.pack_into("<H", data, off + 2 * k, remap[v])
+                        moved += 1
+            print(f"이름 레코드 {rid}: 0x{r['offset']:05X} -> 0x{at:05X} "
+                  f"({len(old)}B -> {len(new)}B, +{grown}) / 점프 {len(a)}개 대상 그대로 "
+                  f"/ 슬롯 {moved}개 재연결")
+        print(f"  블롭 {len(orig):,} -> {len(data):,} B (u16 한계 {BLOB_MAX:,})")
+
     # --- 레코드 재배치 ---
     reloc = ROOT / "translation" / "mbankb_relocate_ko.py"
     if reloc.exists() and NOEXT:
@@ -307,7 +361,9 @@ def main() -> int:
         blob = len(data)
         battle, _ = lzb.decompress((ROOT / "extract" / "BTT" / "BATTLE.LZB").read_bytes())
         battle = bytes(battle)
-        tail = battle[BATTLE_OFF: BATTLE_OFF + (EXT_END - blob)]
+        # 오버레이 쪽 오프셋은 **원래 블롭 크기** 기준이다. 블롭이 자란 만큼 밀어서 잘라야
+        # 확장 구간의 블롭 오프셋과 오버레이 오프셋이 맞는다.
+        tail = battle[BATTLE_OFF + (blob - len(orig)): BATTLE_OFF + (EXT_END - len(orig))]
         buf = bytearray(data) + bytearray(tail)
         mv, nofit = relocate(buf, doc["records"], allrecs, FULL, enc, encode, WHOLE,
                              ext=(EXT_LO, EXT_END, blob))
@@ -315,13 +371,18 @@ def main() -> int:
         extbytes = bytearray(buf[blob:])
 
         used = sum(1 for i, (a, b) in enumerate(zip(tail, extbytes)) if a != b)
-        OUT_EXT.write_bytes(extbytes)
+        # BATTLE 오버레이의 확장 구간은 **원래 블롭 크기(55,353)** 기준으로 놓인다.
+        # 블롭을 키우면 len(data) 가 커지지만 오버레이 쪽 오프셋은 그대로여야 하므로,
+        # 앞부분(블롭이 자란 만큼)은 오버레이 원본 바이트를 그대로 채워 넣는다.
+        # 그래야 build_battle_ko.py 의 "읽히는 앞 512 B" 검사가 유지된다.
+        _head = battle[BATTLE_OFF:BATTLE_OFF + (blob - len(orig))]
+        OUT_EXT.write_bytes(_head + extbytes)
         print(f"레코드 재배치: {mv}개" + (f" / 자리 없음 {len(nofit)}개" if nofit else ""))
         print(f"  확장 구간 {EXT_LO:,}..{EXT_END:,} (BATTLE 0x{BATTLE_OFF:X}~) 에 {used:,} B 사용"
               f" / 여유 {EXT_END - EXT_LO - used:,} B")
 
     data = bytes(data)
-    assert len(data) == len(orig), "크기가 바뀌었다"
+    assert len(data) >= len(orig), "크기가 줄었다"
     changed = sum(1 for a, b in zip(data, orig) if a != b)
     (ROOT / "build" / ("M_BANKB_ko_noext.dec" if NOEXT else "M_BANKB_ko.dec")).write_bytes(data)
 
