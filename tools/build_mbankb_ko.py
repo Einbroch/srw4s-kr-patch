@@ -215,7 +215,9 @@ def main() -> int:
     # 2026-09-05 — `카즈` 로 넣었다가 사용자 판단으로 원문 유지. 두 자로 자른 이름보다
     #   일본어 원문이 낫다고 봤다. 맵 대사에서는 `카즈야` 로 제대로 나온다.
     #   다시 넣으려면 아래 튜플에 ("一矢", "카즈") 를 넣으면 된다 (길이가 같아야 한다).
-    for _jp, _ko in ():
+    # 길이가 **같은** 치환만 한다. 늘리면 다른 진입 경로가 어긋난다
+    # (v0.99e/f 결함 → [[verify-each-entry-path]]).
+    for _jp, _ko in (("一矢", "카즈"), ("ギャリソン", "개리 "), ("洸", "광")):
         _pj, _pk = encode(_jp, enc)[:-1], encode(_ko, enc)[:-1]
         assert len(_pj) == len(_pk), (_jp, _ko)
         _n = 0
@@ -336,6 +338,57 @@ def main() -> int:
                   f"/ 슬롯 {moved}개 재연결")
         print(f"  블롭 {len(orig):,} -> {len(data):,} B (u16 한계 {BLOB_MAX:,})")
 
+    # --- 이름 접두를 **블롭 뒤로** 옮겨 늘린다 ---
+    # M_BANKB 는 RAM 에 두 벌 올라오고, 레코드 id 의 **비트 15** 로 어느 벌을 읽을지
+    # 갈린다(0x8015A7B8):
+    #     비트15=0 -> 0x80146EEC, base = *(0x801A50E8)  = 2차 해제본(LZB 해제물)
+    #     비트15=1 -> 0x80146EC0, base = *(0x80163B74)  = BATTLE 오버레이 안 사본
+    # 재배치된 무기 이름 대사는 오버레이 사본으로 읽혀서 확장 구간이 보이지만,
+    # 이름 항목은 2차 해제본으로 읽혀 **확장 구간이 안 보인다**(2026-09-05 실측 2회:
+    # 확장 위·아래 둘 다 잡글자). 2차 해제본은 LZB 해제물 그 자체이므로,
+    # **블롭을 키우면** 거기에 자리가 생긴다. 게임은 dest/+0x10000/+0x20000 로
+    # 64 KB 슬롯을 잡아 두므로 65,535 까지 안전하고, 슬롯이 u16 이라 한계도 같다.
+    if not NOEXT:
+        from mbankb_jumpfix import move_and_grow as _mag, targets as _tg2
+        from mbankb_reloc import _nslots as _ns5
+        GROW_MOVE = [
+            # (레코드 id, 옮길 접두 바이트 수, [(레코드내 오프셋, 원문 B, 새 이름)])
+            # 접두만 옮긴다 — 뒤쪽은 키 레코드 런(BB:0ABC1)이거나 슬롯이 가리키는
+            # 다른 항목(BB:0AA2D)이라 한 바이트도 움직이면 안 된다.
+            ("BB:0ABC1", 64, [(19, 5, "개리슨"), (36, 2, "아키라"),
+                              (48, 4, "카즈야"), (56, 4, "카즈야")]),
+            ("BB:0AA2D", 68, [(54, 4, "카즈야")]),
+        ]
+        for _rid, _split, _names in GROW_MOVE:
+            _r = _byid[_rid]
+            _pre = bytes(data[_r["offset"]:_r["offset"] + _split])
+            _at = len(data)
+            _new, _remap, _grown = _mag(_pre, _r["offset"], _at, _names, encode, enc)
+            _new += bytes([0xFF])
+            if _at + len(_new) > 65535:
+                print(f"FAIL {_rid}: 블롭이 u16 한계를 넘는다")
+                return 1
+            _a, _b = _tg2(_pre, _r["offset"]), _tg2(_new, _at)
+            if _a != _b:
+                print(f"FAIL {_rid}: 접두 이동 후 점프 대상이 달라졌다")
+                print("  전", [hex(x) for x in _a]); print("  후", [hex(x) for x in _b])
+                return 1
+            data += _new
+            for _i in range(_r["offset"], _r["offset"] + _split):
+                data[_i] = 0xFF
+            _hdr6 = list(struct.unpack_from("<61I", bytes(data), 0))
+            _mvd = 0
+            for _off in [o for o in _hdr6 if o and o + 0x200 <= len(data)]:
+                for _k in range(_ns5(bytes(data), _off)):
+                    _v = struct.unpack_from("<H", data, _off + 2 * _k)[0]
+                    if _v in _remap:
+                        struct.pack_into("<H", data, _off + 2 * _k, _remap[_v])
+                        _mvd += 1
+            print(f"이름 접두 {_rid}: 0x{_r['offset']:05X}+{_split}B -> 0x{_at:05X} "
+                  f"({_split}B -> {len(_new)}B, +{_grown}) / 점프 {len(_a)}개 대상 그대로 "
+                  f"/ 슬롯 {_mvd}개 재연결")
+        print(f"  블롭 {len(orig):,} -> {len(data):,} B (u16 한계 65,535)")
+
     # --- 레코드 재배치 ---
     reloc = ROOT / "translation" / "mbankb_relocate_ko.py"
     if reloc.exists() and NOEXT:
@@ -365,8 +418,68 @@ def main() -> int:
         # 확장 구간의 블롭 오프셋과 오버레이 오프셋이 맞는다.
         tail = battle[BATTLE_OFF + (blob - len(orig)): BATTLE_OFF + (EXT_END - len(orig))]
         buf = bytearray(data) + bytearray(tail)
+
+        # --- 이름 접두를 확장 구간으로 옮겨 늘린다 ---
+        # 레코드를 **통째로** 옮기면 안 된다. BB:0ABC1 의 뒤 14 B 는 키 레코드 런의
+        # #0(키 0x0F03)이고, 런은 슬롯도 점프도 없이 **키 훑기**로만 닿기 때문에
+        # 0x0AC01 에서 한 바이트도 움직이면 안 된다(tools/verify_mb_keyrun.py).
+        # 그래서 마지막 {C:07} 까지의 **접두만** 옮기고 런 부분은 제자리에 둔다.
+        # 비운 자리는 0xFF(빈 레코드)로 채워 모든 바이트가 레코드 경계로 남게 한다.
+        from mbankb_jumpfix import move_and_grow as _mag, targets as _tg2
+        from mbankb_reloc import _nslots as _ns5
+        # 2026-09-05 **보류.** 접두 이동 자체는 데이터 불변식을 다 지킨다 —
+        # 점프 19개 대상 그대로, 슬롯 18개 재연결, 키 런 454개 일치, 비운 자리 FF.
+        # 그런데 실기에서 공격 대사가 대사·음성 없이 잡글자로 나온다. 확장 구간의
+        # **위쪽(0x0FF6E)과 아래쪽(0x0DA39) 둘 다** 같은 식으로 깨졌다. 자리 문제가
+        # 아니라 **이름 레코드 경로에서는 확장 구간이 안 보인다**는 뜻이다.
+        # 레코드 찾기 코드(0x80146EEC)의 베이스가 `*(0x801A50E8)` = M_BANKB 2차
+        # 해제본(0x801A6878, 55,353 B)이고, 확장 바이트는 BATTLE 오버레이 안의
+        # 1차 사본(0x80107B8C) 뒤에만 있다. 2차 해제본에는 그 자리가 없다.
+        # 블롭 안(표 끝 0x0A1AC 뒤)에는 빈자리가 132 B 뿐이고 145 B 가 필요해 안 된다.
+        # => 이 두 레코드는 **같은 길이 치환**만 쓴다 (카즈 / 개리␠ / 광).
+        PREFIX_MOVE: list = []
+        # 확장 구간의 **아래쪽**(EXT_LO=0x0DA39 부터)에 놓는다. 위쪽(0x0FF6E 근처)에
+        # 놨더니 공격 대사가 깨졌다(2026-09-05 실측: 대사·음성 없이 잡글자).
+        # 아래쪽은 재배치 레코드 10여 개가 이미 쓰고 있고 실기에서 정상이다.
+        EXT_CUR = EXT_LO
+        # 직전 배포본 바이트를 다시 만들어 Expected Write 기준으로 쓰려고 둔 스위치.
+        if os.environ.get("SRW4S_MB_NOPREFIX") == "1":
+            PREFIX_MOVE = []
+        for _rid, _split, _names in PREFIX_MOVE:
+            _r = _byid[_rid]
+            _pre = bytes(buf[_r["offset"]:_r["offset"] + _split])
+            _sz = _split + sum(len(encode(k, enc)) - 1 - o for _, o, k in _names) + 1
+            _at = EXT_CUR
+            if _at + _sz > EXT_END:
+                print(f"FAIL {_rid}: 확장 구간에 자리가 없다")
+                return 1
+            _new, _remap, _grown = _mag(_pre, _r["offset"], _at, _names, encode, enc)
+            _new += bytes([0xFF])
+            assert len(_new) == _sz, (len(_new), _sz)
+            _a, _b = _tg2(_pre, _r["offset"]), _tg2(_new, _at)
+            if _a != _b:
+                print(f"FAIL {_rid}: 접두 이동 후 점프 대상이 달라졌다")
+                print("  전", [hex(x) for x in _a]); print("  후", [hex(x) for x in _b])
+                return 1
+            buf[_at:_at + len(_new)] = _new
+            # 비운 자리 채우기 — 런(_split 이후)은 절대 건드리지 않는다.
+            for _i in range(_r["offset"], _r["offset"] + _split):
+                buf[_i] = 0xFF
+            _hdr5 = list(struct.unpack_from("<61I", bytes(buf), 0))
+            _mvd = 0
+            for _off in [o for o in _hdr5 if o and o + 0x200 <= blob]:
+                for _k in range(_ns5(bytes(buf[:blob]), _off)):
+                    _v = struct.unpack_from("<H", buf, _off + 2 * _k)[0]
+                    if _v in _remap:
+                        struct.pack_into("<H", buf, _off + 2 * _k, _remap[_v])
+                        _mvd += 1
+            EXT_CUR = _at + len(_new)
+            print(f"이름 접두 {_rid}: 0x{_r['offset']:05X}+{_split}B -> 0x{_at:05X} "
+                  f"({_split}B -> {len(_new)}B, +{_grown}) / 점프 {len(_a)}개 대상 그대로 "
+                  f"/ 슬롯 {_mvd}개 재연결")
+
         mv, nofit = relocate(buf, doc["records"], allrecs, FULL, enc, encode, WHOLE,
-                             ext=(EXT_LO, EXT_END, blob))
+                             ext=(EXT_CUR, EXT_END, blob))
         data[:] = buf[:blob]
         extbytes = bytearray(buf[blob:])
 
@@ -385,6 +498,18 @@ def main() -> int:
     assert len(data) >= len(orig), "크기가 줄었다"
     changed = sum(1 for a, b in zip(data, orig) if a != b)
     (ROOT / "build" / ("M_BANKB_ko_noext.dec" if NOEXT else "M_BANKB_ko.dec")).write_bytes(data)
+
+    # 키 레코드 런(454개)은 슬롯도 점프도 안 가리키고 **키 훑기**로만 닿는다.
+    # 시작 오프셋이 한 바이트라도 밀리면 화면에 색인 바이트가 글자로 찍힌다.
+    # v0.99e/f 가 이걸로 깨졌다. 자세한 근거는 tools/verify_mb_keyrun.py.
+    from verify_mb_keyrun import check as _keyrun_check
+    _n, _bad = _keyrun_check(bytes(orig), data)
+    if _bad:
+        print(f"FAIL 키 런({_n}개)이 원본과 어긋났다")
+        for _m in _bad:
+            print("   ", _m)
+        return 1
+    print(f"키 런 {_n}개: 시작 오프셋·키 순서 원본과 일치")
 
     comp = lzb_encode.compress(data)
     back, _ = lzb.decompress(comp)
