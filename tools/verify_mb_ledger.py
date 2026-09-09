@@ -100,6 +100,13 @@ def main() -> int:
                     break
         if r["id"] in NO_REFLOW:
             continue          # 바이너리 앞머리 + 대사 꼬리 — 조판 검사가 의미 없다
+        if r.get("live") is False:
+            # 화면에 안 뜨는 u16 표가 글자로 디코드된 것이다(M_BANKS 9,070 중 7,484개,
+            # [[live-false-is-table-data]]). 조판을 재는 게 뜻이 없고 고칠 수도 없다.
+            # 2026-09-06 한도를 296->288 로 조이자 이것들이 951건 쏟아져 나왔다.
+            # **구조 검사(data_prefix / variant_page)는 위에서 이미 끝났다** — 여기서
+            # 거르는 것은 조판(줄 폭·줄 수)뿐이다.
+            continue
         if "{A}" in r["jp"]:
             # 앞머리가 표 데이터라 통째로 재면 폭이 뻥튀기된다(원문도 마찬가지).
             # 화면에 글자로 나오는 건 「」 안쪽뿐이니 거기만 잰다.
@@ -130,6 +137,18 @@ def main() -> int:
             err["line_overflow"].append(f"{r['id']} {wide[0][2]}px>{lpx}")
         if deep:
             err["page_lines"].append(f"{r['id']} {deep[0][1]}줄>{plines}")
+    # 288px 로 조이며 드러난 **선언된 backlog**. 문구를 줄여야 해서 기계 재조판으로는
+    # 안 되는 것들이다(translation/_reflow288_todo.json). 목록에 있는 id 만 봐준다 —
+    # 새로 생기는 위반은 그대로 실패한다. 목록이 줄면 게이트가 저절로 조여진다.
+    _todo = ROOT / "translation" / "_reflow288_todo.json"
+    if _todo.exists():
+        known = {t[0] for t in json.loads(_todo.read_text(encoding="utf-8"))}
+        moved = [m for m in err["line_overflow"] if m.split()[0] in known]
+        err["line_overflow"] = [m for m in err["line_overflow"]
+                                if m.split()[0] not in known]
+        if moved:
+            print(f"  (알려진 backlog {len(moved)}건은 통과 — _reflow288_todo.json)")
+
     tot = sum(len(v) for v in err.values())
     print(f"레코드 {len(L['records']):,} / 역문 {ntr:,}")
     for k, v in err.items():

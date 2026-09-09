@@ -60,15 +60,28 @@ def ko_alias_offsets(jp: str, ko: str, enc: dict[str, int]) -> dict[int, int]:
             continue
         n = seen.get(a, 0)
         seen[a] = n + 1
-        if i + 1 >= len(jc):
-            continue
         cand = kpos.get(a) or []
         if a.startswith("{N") and len(cand) != sum(1 for x, _ in jc if x.startswith("{N")):
             continue                        # 재조판으로 줄바꿈 개수가 달라졌다
         if n >= len(cand):
             continue
         j = cand[n]
-        if j + 1 >= len(kc):
+        # 2026-09-06 **앵커 자신의 자리를 잇는 것은 되돌렸다.**
+        #   `out[b] = kc[j][1]` 을 넣었더니 매핑이 51 -> 81 로 늘었지만, 실기에서
+        #   **게임 시작부터 대사가 깨졌다** — 메시지 종단을 넘어가 다음 메시지까지
+        #   한 줄로 이어 붙고 사이에 잡글자가 끼었다(`…마라!」QGQ카즈야「…`).
+        #   앵커 자리를 가리키는 별칭이 전부 "화자 이름을 뗀 재사용"인 것은 아니고,
+        #   그중에는 옮기면 안 되는 것이 섞여 있다. 근거 없이 일괄로 이으면 안 된다.
+        if i + 1 >= len(jc) or j + 1 >= len(kc):
             continue
         out[jc[i + 1][1]] = kc[j + 1][1]    # 토큰 **뒤** 자리끼리 잇는다
+        # 앵커 뒤로 **양쪽 토막이 글자까지 같은 동안** 계속 이어 준다.
+        # `{P}{E:1F}Ⅱ화자「...`처럼 페이지 머리의 장식 글자가 원문·역문에 똑같이
+        # 남아 있으면, 그 뒤(=화자 이름 시작)까지가 대응 자리다. 글자가 갈리는
+        # 순간 멈추므로 문장 도중으로는 넘어가지 않는다.
+        p, q = i + 1, j + 1
+        while p + 1 < len(jc) and q + 1 < len(kc) and jc[p][0] == kc[q][0]:
+            out[jc[p + 1][1]] = kc[q + 1][1]
+            p += 1
+            q += 1
     return out

@@ -16,8 +16,19 @@
 from __future__ import annotations
 import re
 
-LINE_PX = 296
+# 2026-09-06 **296 -> 288.** 원문 줄 폭을 전수로 재니 절벽이 분명하다 — 순수 글자
+# 줄은 288px 를 절대 안 넘고, 296px 인 원문은 딱 두 줄뿐인데 **둘 다 `{B:}`**(이름
+# 삽입)를 갖는다. 그 80px 추정 때문에 부풀려 재진 것이지 실제 폭이 아니다.
+# 296 으로 두는 동안 역문 250줄이 그 틈으로 새어 나가 화면에서 넘쳤다
+# (사용자 실기: 가라리아 대사 MB:1800E, 296px 줄이 감겨 앞을 덮어썼다).
+LINE_PX = 296 - 8
 PAGE_LINES = 3
+
+# **판정용은 296 그대로 둔다.** wide_window() 는 "원문 자신이 규약을 넘느냐"로
+# 넓은 창을 가려내는데, 여기까지 288 로 조이면 `{B:}` 때문에 296 으로 재진 평범한
+# 대사 61개가 넓은 창(9줄)으로 잘못 넘어가 역문이 부풀 자리가 생긴다.
+# 재는 기준(296)과 지키는 기준(288)은 다른 값이다.
+DETECT_PX = 296
 
 # 유닛/캐릭터 도감은 대사창이 아니라 **넓은 창**에 그려진다.
 # 창이 넓어 보이는 건 **줄 수**(최대 9줄)이지 줄 폭이 아니다 — 폭은 대사창과 비슷하다.
@@ -179,7 +190,7 @@ def wide_window(jp: str, enc) -> bool:
         if len(segs) > PAGE_LINES:
             return True
         for seg in segs:
-            if sum(atom_px(a, enc) for a in atoms(seg)) > LINE_PX:
+            if sum(atom_px(a, enc) for a in atoms(seg)) > DETECT_PX:
                 return True
     return False
 

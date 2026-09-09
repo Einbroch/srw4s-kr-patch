@@ -75,6 +75,11 @@ def main() -> int:
     ap.add_argument("--grow", action="append", default=[], metavar="ISO=FILE",
                     help="원래 LBA에 그대로 두되 섹터 수를 늘린다. 늘어난 섹터는 "
                          "같은 실행의 --relocate 로 비워진 자리여야 한다.")
+    ap.add_argument("--assume-free", action="append", default=[], metavar="LBA-LBA",
+                    help="ISO 디렉터리상 **미할당**임을 확인한 구간을 빈자리로 인정한다. "
+                         "파일을 꼬리로 옮기고 남은 잔재 자리처럼, 같은 실행의 "
+                         "--relocate 로 비우지 않았지만 이미 비어 있는 곳에 쓴다. "
+                         "리스팅의 어떤 파일과도 겹치면 실패한다.")
     ap.add_argument("--free-start", type=int, default=166581)
     ap.add_argument("--free-end", type=int, default=166730)   # inclusive
     ap.add_argument("--fresh", action="store_true")
@@ -158,6 +163,17 @@ def main() -> int:
     for m in manifest:
         n = max(1, math.ceil(m["old_size"] / USER))
         freed.update(range(m["old_lba"], m["old_lba"] + n))
+
+    # --assume-free: 디렉터리가 할당의 정본이다. 어떤 파일과도 안 겹치면 빈자리로 본다.
+    for spec in args.assume_free:
+        a_s, _, b_s = spec.partition("-")
+        a, b = int(a_s, 0), int(b_s, 0)
+        for name, (lba, size) in files.items():
+            end = lba + max(1, math.ceil(size / USER))
+            if lba <= b and end > a:
+                raise SystemExit(f"--assume-free {a}-{b} 가 {name}(LBA {lba}..{end-1})와 겹친다")
+        freed.update(range(a, b + 1))
+        print(f"미할당으로 인정: LBA {a}..{b} ({b - a + 1}섹터)")
 
     for spec in args.grow:
         iso, _, newfile = spec.partition("=")

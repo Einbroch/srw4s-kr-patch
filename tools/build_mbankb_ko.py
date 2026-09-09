@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 import os
-import hashlib, json, runpy, struct, sys
+import hashlib, json, re, runpy, struct, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +32,32 @@ SECTORS = 17                                   # 원본이 차지한 섹터 수
 # 읽힌 건 M_BANKB 끝에 붙은 첫 조각 하나뿐, 그것도 커널 적재 루틴이었다).
 # 그 첫 512 B 는 여백으로 비켜 둔다.
 EXT_LO   = 55353 + 512                         # 블롭 기준 오프셋 (RAM 0x801155C5)
-EXT_END  = 65535                               # u16 한계
+# **실측으로 좁힌 창.** 이 자리는 BATTLE 오버레이의 전투 애니메이션 명령 스트림이라
+# u16 한계(65,535)까지 다 쓰면 안 된다. `D:/srw4s_ko/extscan.lua` 로 128 B 조각마다
+# 읽기 BP 를 걸고 **LZB 해제기(0x800C3600..0x800C3B00)와 BIOS 읽기를 걸러낸** 뒤
+# 여러 기체로 전투해 본 결과, 게임이 실제로 읽은 조각은 7개뿐이고 가장 큰 빈 구간이
+# 블롭 55,865..60,473 (4,608 B) 이었다. 그 안에서만 쓴다.
+#   (초판 측정은 해제기 읽기를 못 걸러 76조각 전부 "읽힘"으로 나왔다.)
+# 2026-09-06 — 교집합 창(55,865..59,449) + 미러링으로 넓혀 봤더니 빌드 sha 가
+# 스프라이트가 사라졌던 f80a5808 과 **바이트 동일**하게 나왔다. 두 측정이 안전이라
+# 했는데 실기는 아니었다는 뜻이므로 되돌린다. `growroom` 은 무장한 **뒤의 쓰기**만
+# 보므로, 그 RAM 에 이미 남의 데이터가 올라와 있고 게임이 **읽기만** 하면 못 잡는다.
+EXT_END  = 60473
+
+# 재배치가 쓸 블롭 여유. 확장 구간을 안 쓰기로 했으므로 여기서 다 감당해야 한다.
+# 늘리면 압축본이 커진다 — 17섹터(34,816 B) 예산 안에 드는지 빌드가 알려 준다.
+RELOC_RESERVE = int(os.environ.get('SRW4S_MB_RESERVE', '1200'))
+
+# 2차 해제본(RAM 0x801A6878) 뒤 여유. **프로브로 쟀다**(D:/srw4s_ko/bloblimit.lua,
+# 2026-09-09): 블롭 끝 뒤 10 KB 에 쓰기 BP 를 걸고 전투를 돌렸더니 **base+65,198
+# 조각(512 B)에서 처음** 남이 썼다. 그 조각은 정적 할당표의 버퍼 0x801B6800
+# (= base+65,416) 을 품는다 — 실측과 정적 분석이 같은 자리를 가리킨다.
+# 그래서 예전에 "57,896 이 벽"이라 한 것은 **틀렸다**. 그때 RELOC_RESERVE 를 줄여
+# 크기를 바꿨는데 그러면 어떤 레코드가 어디 놓이는지도 같이 바뀐다 — 크기와 내용을
+# 한꺼번에 흔들고 크기 탓을 했다.
+# 다만 할당표에는 0x801B5800(= base+61,320) 도 있고 프로브가 돈 화면에서만 안 쓰였다.
+# 그래서 상한은 그 앞으로 보수적으로 잡는다.
+MAX_BLOB = int(os.environ.get('SRW4S_MB_MAXBLOB', '61320'))
 BATTLE_OFF = 0x801153C5 - 0x80106380           # 블롭 끝의 BATTLE 오버레이 오프셋
 OUT_EXT = ROOT / "build" / "MBANKB_EXT.bin"    # 확장 구간 바이트 (BATTLE 에 써 넣는다)
 
@@ -164,6 +189,56 @@ def main() -> int:
                 print(f"FAIL 표밖 {rid}: {got}B != {wantn}B")
             return 1
         print(f"표 밖 전투 대사: {hn}개 교체")
+
+        # --- 표 밖 이웃끼리 바이트 주고받기 (총 길이 보존) ---
+        # 표 밖 레코드는 진입점이 아니라 **경유지**다. VM 이 앞쪽 진입점에서 흘러와
+        # 종단(0xFF)을 세며 지나간다(실기 dropsrc4). 그래서 두 이웃의 **총 바이트**와
+        # **종단 개수**만 지키면 경계는 옮겨도 된다 — 뒤쪽 오프셋이 하나도 안 변한다.
+        _pair = runpy.run_path(str(ROOT / "translation" / "mbankb_relocate_ko.py")
+                               ).get("HIDDEN_PAIR", [])
+        if _pair:
+            _by = {r["id"]: r for r in H["records"]}
+            _hdr = list(struct.unpack_from("<61I", bytes(data), 0))
+            _tbls = [o for o in _hdr if o and o + 0x200 <= len(data)]
+            for _ida, _koa, _idb, _kob in _pair:
+                _a, _b = _by.get(_ida), _by.get(_idb)
+                if not _a or not _b:
+                    print(f"FAIL 짝 {_ida}/{_idb}: 원장에 없다")
+                    return 1
+                if _a["end"] != _b["offset"]:
+                    print(f"FAIL 짝 {_ida}/{_idb}: 붙어 있지 않다 "
+                          f"({_a['end']:#07x} != {_b['offset']:#07x})")
+                    return 1
+                _lo, _hi = _a["offset"], _b["end"]
+                # 게이트: 이 구간을 가리키는 슬롯·점프가 하나라도 있으면 경계를 못 옮긴다.
+                _ptr = []
+                for _t in _tbls:
+                    for _k in range((len(data) - _t) // 2):
+                        if _k >= 400:
+                            break
+                        _v = struct.unpack_from("<H", bytes(data), _t + 2 * _k)[0]
+                        if _lo <= _v < _hi:
+                            _ptr.append(f"슬롯 {_t:#07x}[{_k}]")
+                _q = 0
+                while _q < len(data) - 3:
+                    if data[_q] == 0xFC and data[_q + 1] in (6, 7):
+                        _tg = _q + 2 + struct.unpack_from("<h", bytes(data), _q + 2)[0]
+                        if _lo <= _tg < _hi:
+                            _ptr.append(f"점프 {_q:#07x}")
+                        _q += 4
+                    else:
+                        _q += 1
+                if _ptr:
+                    print(f"FAIL 짝 {_ida}/{_idb}: 구간을 가리키는 것이 있다 {_ptr[:6]}")
+                    return 1
+                _na, _nb = encode(_koa, enc), encode(_kob, enc)
+                if len(_na) + len(_nb) != _hi - _lo:
+                    print(f"FAIL 짝 {_ida}/{_idb}: 합계 {len(_na)}+{len(_nb)} "
+                          f"!= {_hi - _lo} B")
+                    return 1
+                data[_lo:_hi] = _na + _nb
+                print(f"표 밖 짝 교체: {_ida} {len(_na)}B + {_idb} {len(_nb)}B "
+                      f"= {_hi - _lo}B (경계 {_a['end']:#07x} -> {_lo + len(_na):#07x})")
 
     # --- 전투 화자 이름: 늘리고 **점프 s16 을 보정한다** ---
     # 자세한 근거는 tools/mbankb_jumpfix.py 머리말.
@@ -395,20 +470,41 @@ def main() -> int:
         from mbankb_reloc import relocate
         _rl = runpy.run_path(str(reloc))
         FULL, WHOLE = _rl["FULL"], _rl.get("WHOLE", {})
+        COPY = _rl.get("COPY", ())
         allrecs = list(doc["records"])
         _h = ROOT / "translation" / "mbankb_hidden_ledger.json"
         if _h.exists():
             allrecs += json.loads(_h.read_text(encoding="utf-8"))["records"]
-        mv, nofit = relocate(data, doc["records"], allrecs, FULL, enc, encode, WHOLE)
+        mv, nofit = relocate(data, doc["records"], allrecs, FULL, enc, encode, WHOLE,
+                             COPY=COPY)
         print(f"레코드 재배치(확장 없음): {mv}개 / 자리 없음 {len(nofit)}개")
     elif reloc.exists():
         from mbankb_reloc import relocate
         _rl = runpy.run_path(str(reloc))
         FULL, WHOLE = _rl["FULL"], _rl.get("WHOLE", {})
+        COPY = _rl.get("COPY", ())
         allrecs = list(doc["records"])
         hid = ROOT / "translation" / "mbankb_hidden_ledger.json"
         if hid.exists():
             allrecs += json.loads(hid.read_text(encoding="utf-8"))["records"]
+        # --- COPY 레코드 몫만큼 블롭을 미리 키운다 ---
+        # 사본을 **확장 구간에 두면 안 된다.** 확장은 BATTLE 오버레이 사본
+        # (비트15=1)에만 있는데([[mbankb-two-copies]]), 어느 사본을 읽을지는 표가
+        # 아니라 **호출 경로**가 정한다. 블롭은 두 사본에 다 있으므로 어느 경로로
+        # 와도 안전하다 — 이름 접두를 블롭 확장으로 옮긴 것이 실기에서 통과했다.
+        # 여유를 조금 더 두는 것은 공짜다(압축 뒤 몇 바이트).
+        # 재배치가 쓸 자리를 **블롭 안에** 미리 확보한다.
+        # 확장 구간은 안 쓴다(EXT_OK_TABLES 가 비었다) — 그 자리는 호출 경로에 따라
+        # 안 보이고, 안 보이면 초기화 안 된 RAM 을 글자로 읽는다.
+        # u16 슬롯 한계 65,535 와 압축 예산 34,816 B(17섹터) 안에서만 키운다.
+        _need = sum(len(encode(WHOLE[i], enc)) for i in COPY if i in WHOLE)
+        _grow = _need + RELOC_RESERVE
+        if len(data) + _grow > 65535:
+            print(f"FAIL 블롭을 {_grow} B 키우면 u16 한계를 넘는다")
+            return 1
+        data += bytearray([0xFF]) * _grow
+        print(f"  재배치용으로 블롭에 {_grow:,} B 확보 (COPY {_need} + 여유 {RELOC_RESERVE})")
+
         # 블롭 뒤 BATTLE 오버레이 구간을 이어 붙여 확장 버퍼를 만든다.
         # 표 슬롯이 u16 이라 블롭 시작 +65,535 까지가 한계다.
         blob = len(data)
@@ -478,10 +574,129 @@ def main() -> int:
                   f"({_split}B -> {len(_new)}B, +{_grown}) / 점프 {len(_a)}개 대상 그대로 "
                   f"/ 슬롯 {_mvd}개 재연결")
 
+        # 2026-09-06 **오버레이 확장 구간 사용 중단.**
+        # 그 자리는 BATTLE 오버레이의 **전투 애니메이션 명령 스트림**이다. 260 B 만
+        # 쓸 때는 티가 안 났는데, 83건 복원으로 1,234 B 를 덮자 점보트3 합체 후
+        # 피격에서 **로봇 스프라이트가 사라졌다**(실기). 예전 읽기 BP 측정이
+        # "전투 중 한 번도 안 읽힘" 이라 했지만 그건 한 기체 한 전투였다.
+        # 재배치는 블롭 안 빈자리만 쓴다. 이름 접두는 블롭을 키운 자리(비트15=0
+        # 경로, 실기 확인)에 그대로 둔다.
         mv, nofit = relocate(buf, doc["records"], allrecs, FULL, enc, encode, WHOLE,
+                             COPY=COPY,
                              ext=(EXT_CUR, EXT_END, blob))
-        data[:] = buf[:blob]
         extbytes = bytearray(buf[blob:])
+        # --- 재배치 레코드는 **두 사본 모두**에서 보여야 한다 ---
+        # M_BANKB 는 RAM 에 두 벌 올라오고 레코드 id 의 비트 15 가 어느 벌을 읽을지
+        # 고른다(0x8015A7B8, [[mbankb-two-copies]]). 확장 구간은 BATTLE 오버레이
+        # 사본(비트15=1)에만 있고 LZB 2차 해제본(비트15=0)에는 없다.
+        # 표 0x09FB8 처럼 비트15=0 으로 읽히는 표의 레코드를 확장 구간에만 두면
+        # 게임이 쓰레기를 읽는다 — 2026-09-06 실기에서 **멈춤**으로 나타났다
+        # (점보트3 합체 후 피격). 그래서 쓰인 자리까지 **블롭도 같이 키워**
+        # 같은 바이트를 두 사본에 둔다. 슬롯이 u16 이라 65,535 까지 안전하다.
+        extbytes = bytearray(buf[blob:])
+        # 창 **밖**을 한 바이트라도 건드리면 실패시킨다. 그 밖은 게임이 읽는
+        # 애니메이션 데이터다(실측: 조각 #36~ 이후가 pc=0x80149E9C 에서 읽힌다).
+        _out = [blob + i for i, (a, b) in enumerate(zip(tail, extbytes))
+                if a != b and not (EXT_LO <= blob + i < EXT_END)]
+        if _out:
+            print(f"FAIL 확장 창 밖을 건드렸다: {len(_out)}곳 예 {[hex(x) for x in _out[:5]]}")
+            return 1
+        # 재배치 레코드는 **두 사본 모두**에서 보여야 한다([[mbankb-two-copies]]).
+        # 확장 구간은 오버레이 사본(비트15=1)에만 있으므로, 쓰인 자리까지 블롭도
+        # 같이 키워 같은 바이트를 2차 해제본(비트15=0)에도 둔다.
+        # 미러링 금지. 블롭을 57,127 B 로 키운 빌드에서 스프라이트가 사라졌고,
+        # 격리 시험(56,503 B)은 해당 스테이지를 지나쳐 검증할 수 없었다.
+        # **실기로 확인된 한도는 55,498 B(이름 접두)뿐이다.** 그 위는 근거가 없다.
+        data[:] = buf[:blob]
+
+        # --- 표 밖 대사를 옮겨서 늘린다 ---
+        # 칸이 모자란 표 밖 레코드를 **블롭 끝에 새로 놓고**, 그걸 가리키던
+        # `{C:01}{A}` 상대 오프셋 표의 참조를 전부 새 자리로 돌린다.
+        # 기존 레코드 경계는 하나도 안 움직인다 — 경계를 옮겼다가 실기에서 깨진
+        # 전례가 있다([[exhaustive-is-not-complete]]).
+        # 게이트: 목록에 **폰트에 없는 글자**가 있으면 여기서 다 알려 주고 멈춘다.
+        # 안 그러면 encode 가 첫 글자 하나만 KeyError 로 던져 하나씩 고치게 된다.
+        # (한글은 할당된 것만 있다 — `깟` 처럼 흔해 보여도 없을 수 있다.)
+        _missing = []
+        for _d, _lbl in ((_rl.get("FULL", {}), "FULL"),
+                         (_rl.get("HIDDEN_MOVE", {}), "HIDDEN_MOVE")):
+            for _k, _v in _d.items():
+                for _c in set(re.sub(r"\{[^}]*\}", "", _v)):
+                    if _c not in enc:
+                        _missing.append((_lbl, _k, _c))
+        if _missing:
+            for _lbl, _k, _c in _missing[:12]:
+                print(f"FAIL {_lbl} {_k}: 폰트에 없는 글자 '{_c}'")
+            return 1
+
+        _mv = _rl.get("HIDDEN_MOVE", {})
+        _moved = []
+        # 게이트: **참조 이동은 마지막 런타임 PASS 집합을 넘지 않는다.**
+        # 이 방식은 "블롭 안에서 그 레코드를 가리키는 참조를 전수로 찾았다"를 근거로
+        # 삼는데, 그것만으로는 외부 참조 완전성이 증명되지 않는다
+        # (LOCALIZATION_QA_STANDARD §8.3.1). 실제로 34건에서 61건/50건으로 늘렸을 때
+        # 같은 RC 가 빈칸·멈춤·정상을 모두 냈다 — **간헐 결함**이라 통과 한 번으로는
+        # 안전을 증명할 수 없다. 그래서 known-good floor 를 유지한다.
+        # 늘리려면 SRW4S_MB_MOVE_FLOOR 를 명시적으로 올리고, 그 빌드는 canonical 이
+        # 아니라 RC 로만 다룬다.
+        _floor = int(os.environ.get("SRW4S_MB_MOVE_FLOOR", "34"))
+        if len(_mv) > _floor:
+            print(f"FAIL 참조 이동 {len(_mv)}건 > 런타임 PASS floor {_floor}건 "
+                  f"(QA 표준 8.3.1). SRW4S_MB_MOVE_FLOOR 로 명시적으로 올리세요")
+            return 1
+        if _mv:
+            import mbankb_href
+            # 원장 둘 다 뒤진다 — 표 밖(BH:)뿐 아니라 표 안(BB:) 레코드도
+            # `{C:01}{A}` 참조로 닿는 경우가 있다(BB:0D0A7 은 슬롯 8개 + 참조 1곳).
+            _hid2 = json.loads((ROOT / "translation" /
+                                "mbankb_hidden_ledger.json").read_text(encoding="utf-8"))
+            _hby = {r["id"]: r for r in _hid2["records"]}
+            _hby.update({r["id"]: r for r in doc["records"]})
+            for _rid, _ko in _mv.items():
+                _r = _hby.get(_rid)
+                if not _r:
+                    print(f"FAIL 표밖 이동 {_rid}: 원장에 없다")
+                    return 1
+                _nb = encode(_ko, enc)
+                _at = len(data)
+                data += _nb
+                try:
+                    _n = mbankb_href.repoint(data, _r["offset"], _at)
+                except ValueError as e:
+                    print(f"FAIL 표밖 이동 {_rid}: {e}")
+                    return 1
+                if _n == 0:
+                    print(f"FAIL 표밖 이동 {_rid}: 가리키는 참조가 없다")
+                    return 1
+                # 게이트: 새 자리에서 읽으면 정말 그 역문인가
+                _end = data.find(bytes([0xFF]), _at) + 1
+                if bytes(data[_at:_end]) != _nb:
+                    print(f"FAIL 표밖 이동 {_rid}: 새 자리 내용이 다르다")
+                    return 1
+                _moved.append((_rid, _r["offset"], _at, _nb, _n))
+                print(f"표 밖 이동: {_rid} 0x{_r['offset']:05X}({_r['end']-_r['offset']}B)"
+                      f" -> 0x{_at:05X}({len(_nb)}B) / 참조 {_n}곳 재연결  {_ko}")
+
+            # 게이트: **전부 붙인 뒤 다시 본다.** 붙이는 순간의 검사는 그 뒤에 일어나는
+            # 덮어쓰기를 못 잡는다 — repoint 는 매번 블롭 전체를 다시 훑으므로 나중 항목이
+            # 앞 항목의 바이트를 건드릴 수 있다. 옛 자리를 가리키는 참조가 남았는지,
+            # 새 자리의 내용이 그대로인지, 참조 수가 맞는지 셋 다 확인한다.
+            _bad = []
+            for _rid, _old, _at, _nb, _n in _moved:
+                if bytes(data[_at:_at + len(_nb)]) != _nb:
+                    _bad.append(f"{_rid}: 새 자리 0x{_at:05X} 내용이 나중에 덮였다")
+                _left = mbankb_href.refs_to(bytes(data), _old)
+                if _left:
+                    _bad.append(f"{_rid}: 옛 자리 0x{_old:05X} 를 가리키는 참조 {len(_left)}곳 남음")
+                _now = mbankb_href.refs_to(bytes(data), _at)
+                if len(_now) != _n:
+                    _bad.append(f"{_rid}: 새 자리 참조 {len(_now)}곳 (재연결한 {_n}곳과 다름)")
+            if _bad:
+                for _m in _bad[:12]:
+                    print("FAIL 표 밖 이동 최종 검사 — " + _m)
+                return 1
+            print(f"  표 밖 이동 최종 검사 통과: {len(_moved)}건 / "
+                  f"참조 {sum(m[4] for m in _moved)}곳")
 
         used = sum(1 for i, (a, b) in enumerate(zip(tail, extbytes)) if a != b)
         # BATTLE 오버레이의 확장 구간은 **원래 블롭 크기(55,353)** 기준으로 놓인다.
@@ -491,8 +706,23 @@ def main() -> int:
         _head = battle[BATTLE_OFF:BATTLE_OFF + (blob - len(orig))]
         OUT_EXT.write_bytes(_head + extbytes)
         print(f"레코드 재배치: {mv}개" + (f" / 자리 없음 {len(nofit)}개" if nofit else ""))
+        if nofit:
+            # 무엇이 못 들어갔는지 보여 준다 — RELOC_RESERVE 를 얼마나 더 줄지 판단용
+            for _i in nofit[:12]:
+                _r = _byid.get(_i)
+                _q = (_r["jp"] if _r else "")[:44]
+                print(f"     {_i}  {_q}")
         print(f"  확장 구간 {EXT_LO:,}..{EXT_END:,} (BATTLE 0x{BATTLE_OFF:X}~) 에 {used:,} B 사용"
               f" / 여유 {EXT_END - EXT_LO - used:,} B")
+        print(f"  블롭도 {blob:,} -> {len(data):,} B 로 키워 두 사본에 같이 둔다")
+        # 게이트: **2차 해제본은 고정 버퍼에 풀린다.** 넘기면 뒤를 덮어 게임이 멈춘다.
+        # 한계는 프로브 실측이다(MAX_BLOB 주석 참조) — 이분법으로 얻은 57,896 은
+        # 크기와 내용을 같이 흔든 잘못된 결론이었다. u16 한계(65,535)와 압축 예산을
+        # 통과해도 여기서 걸린다.
+        if len(data) > MAX_BLOB:
+            print(f"FAIL 블롭 {len(data):,} B > 상한 {MAX_BLOB:,} B "
+                  f"(실측 안전선). RELOC_RESERVE 를 줄이거나 항목을 덜어내세요")
+            return 1
 
     data = bytes(data)
     assert len(data) >= len(orig), "크기가 줄었다"
@@ -503,13 +733,13 @@ def main() -> int:
     # 시작 오프셋이 한 바이트라도 밀리면 화면에 색인 바이트가 글자로 찍힌다.
     # v0.99e/f 가 이걸로 깨졌다. 자세한 근거는 tools/verify_mb_keyrun.py.
     from verify_mb_keyrun import check as _keyrun_check
-    _n, _bad = _keyrun_check(bytes(orig), data)
+    _nrun, _nrec, _bad = _keyrun_check(bytes(orig), data)
     if _bad:
-        print(f"FAIL 키 런({_n}개)이 원본과 어긋났다")
-        for _m in _bad:
+        print(f"FAIL 키 런 {_nrun}개({_nrec:,}레코드)가 원본과 어긋났다")
+        for _m in _bad[:10]:
             print("   ", _m)
         return 1
-    print(f"키 런 {_n}개: 시작 오프셋·키 순서 원본과 일치")
+    print(f"키 런 {_nrun}개 / 레코드 {_nrec:,}개: 시작 오프셋·키 순서 원본과 일치")
 
     comp = lzb_encode.compress(data)
     back, _ = lzb.decompress(comp)
@@ -534,4 +764,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # 이 빌드는 **환경변수로만** 조절한다(SRW4S_MB_NOEXT / _RESERVE / _MAXBLOB /
+    # _AUTOMOVE / _AUTOFULL / _SHORT). 인자를 받는 곳이 없어서 `--noext` 같은 것을
+    # 붙이면 조용히 무시되고, 겉보기엔 성공한 채 **낡은 M_BANKB_ko_noext.dec 로
+    # C_BEFCT 가 빌드된다**(2026-09-09 실측: 하루치 텍스트가 사본에 안 실렸다).
+    # 그래서 모르는 인자는 받지 않고 여기서 멈춘다.
+    if sys.argv[1:]:
+        print("FAIL 이 빌드는 인자를 받지 않는다: " + " ".join(sys.argv[1:]))
+        print("     확장 구간 없이 빌드하려면  SRW4S_MB_NOEXT=1 python tools/build_mbankb_ko.py")
+        raise SystemExit(2)
     raise SystemExit(main())
