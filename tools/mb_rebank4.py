@@ -88,6 +88,15 @@ def tok_end(d: bytes, s: int):
     return None
 
 
+DEAD_ALIAS: dict = {}
+try:
+    import runpy as _rp
+    DEAD_ALIAS = _rp.run_path(
+        str(ROOT / "translation" / "mbanks_dead_alias.py"))["DEAD"]
+except Exception:
+    pass
+
+
 def load_translations(d: bytes, targets: set[int]):
     """번역할 레코드의 새 바이트와, 레코드 **안쪽**을 가리키는 별칭 포인터 목록.
 
@@ -127,7 +136,7 @@ def load_translations(d: bytes, targets: set[int]):
                 rel = x - t
                 parent[x] = t
                 if rel > cpl and rel in kmap:
-                    alias_ko[x] = (nb[kmap[rel]:], len(raw) - rel)
+                    alias_ko[x] = (nb[kmap[rel]:], len(raw) - rel, kmap[rel])
                 if rel <= cpl:
                     # 그 표 블록에 정본 시작이 없고 **별칭만** 있는 경우가 있다
                     # (H04:E0000 -> 0x05189). 그때도 역문을 읽게 하려면 따로 등록해야 한다.
@@ -154,6 +163,13 @@ def main() -> int:
         for rel in struct.unpack_from("<256H", d, offs[bi]):
             if b0 + rel < len(d):
                 targets.add(b0 + rel)
+    # 안 쓰는 표 칸이 만들어 낸 가짜 별칭은 뺀다
+    # (translation/mbanks_dead_alias.py — 선언한 것만).
+    if DEAD_ALIAS:
+        n0 = len(targets)
+        targets -= set(DEAD_ALIAS)
+        if n0 != len(targets):
+            print(f"  가짜 별칭 {n0 - len(targets)}개 제외 (선언 목록)")
     global TRANS, INNER, ALIAS_TR, ALIAS_PARENT, ALIAS_KO
     TRANS, INNER, ALIAS_TR, ALIAS_PARENT, ALIAS_KO = (
         load_translations(d, targets) if "--tr" in sys.argv else ({}, {}, {}, {}, {}))
@@ -261,10 +277,15 @@ def main() -> int:
                     for q2, inpref in INNER.get(q, ()):
                         if inpref:
                             moved[q2] = startpos + (q2 - q)   # 안 바뀐 앞부분 안
-                        else:
-                            k2 = ALIAS_KO.get(q2)
-                            moved[q2] = len(out)              # 역문 자리 / 원문 접미사 사본
-                            out += k2[0] if k2 else d[q2:q + tr[1]]
+                            continue
+                        k2 = ALIAS_KO.get(q2)
+                        if k2:
+                            # 옮길 자리를 아는 별칭은 **방금 써 넣은 역문 안**을
+                            # 가리킨다. 예전에는 같은 바이트를 한 벌 더 붙였다.
+                            moved[q2] = startpos + k2[2]
+                            continue
+                        moved[q2] = len(out)                  # 원문 접미사 사본
+                        out += d[q2:q + tr[1]]
                     q += tr[1]
                 else:
                     out.append(d[q])
