@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from mb_codec import build_encoder, encode    # noqa: E402
 import lzb, lzb_encode                        # noqa: E402
+import mbankb_href as mbankb_href_mod          # noqa: E402
 
 SRC = ROOT / "extract" / "BTT" / "M_BANKB.LZB"
 LEDGER = ROOT / "translation" / "mbankb_ledger.json"
@@ -71,6 +72,7 @@ ARITY_TOK = {0xF6: 0, 0xF7: 0, 0xF8: 1, 0xF9: 1, 0xFA: 0,
 
 
 def main() -> int:
+    _reref = []      # repoint 가 쓴 (u16 오프셋, delta)
     raw_lzb = SRC.read_bytes()
     dec, _ = lzb.decompress(raw_lzb)
     data = bytearray(dec)
@@ -630,16 +632,36 @@ def main() -> int:
             return 1
 
         _mv = _rl.get("HIDDEN_MOVE", {})
-        _moved = []
-        # 게이트: **참조 이동은 마지막 런타임 PASS 집합을 넘지 않는다.**
-        # 이 방식은 "블롭 안에서 그 레코드를 가리키는 참조를 전수로 찾았다"를 근거로
-        # 삼는데, 그것만으로는 외부 참조 완전성이 증명되지 않는다
-        # (LOCALIZATION_QA_STANDARD §8.3.1). 실제로 34건에서 61건/50건으로 늘렸을 때
-        # 같은 RC 가 빈칸·멈춤·정상을 모두 냈다 — **간헐 결함**이라 통과 한 번으로는
-        # 안전을 증명할 수 없다. 그래서 known-good floor 를 유지한다.
-        # 늘리려면 SRW4S_MB_MOVE_FLOOR 를 명시적으로 올리고, 그 빌드는 canonical 이
-        # 아니라 RC 로만 다룬다.
-        _floor = int(os.environ.get("SRW4S_MB_MOVE_FLOOR", "34"))
+        _moved, _nofit_reach = [], []
+        # 블롭 안의 빈 구멍 — 사정거리 밖 레코드를 여기에 놓는다.
+        _cov = bytearray(len(orig))
+        for _rr in list(doc["records"]) + json.loads(
+                (ROOT / "translation" / "mbankb_hidden_ledger.json")
+                .read_text(encoding="utf-8"))["records"]:
+            for _k in range(_rr["offset"], min(_rr["end"], len(orig))):
+                _cov[_k] = 1
+        for _a, _b in mbankb_href_mod.slot_spans(orig):
+            for _k in range(_a, min(_b, len(orig))):
+                _cov[_k] = 1
+        _reftargets = {_t for _s2, _v2 in mbankb_href_mod.tables(bytes(data))
+                       for _a2, _vv2, _t in _v2}
+        _freeholes, _k = [], 0
+        while _k < len(orig):
+            if not _cov[_k]:
+                _j = _k
+                while _j < len(orig) and not _cov[_j]:
+                    _j += 1
+                if _j - _k >= 8:
+                    _freeholes.append((_k, _j - _k))
+                _k = _j
+            else:
+                _k += 1
+        # 상한. 예전엔 「간헐 결함이 무서워서」 34 로 묶어 뒀는데, 그 결함의 정체가
+        # 밝혀졌다 — `{C:01}{A}` 오프셋이 **s16** 이라 32,767 을 넘기면 게임이 음수로
+        # 읽어 블롭 앞으로 튕긴다(2026-09-12 확정). 이제 사정거리 검사와 재연결 게이트가
+        # 그걸 기계적으로 막으므로, 이 숫자는 「생각보다 많이 옮기고 있지 않은가」를
+        # 알려 주는 눈금일 뿐이다. 늘릴 때는 실기 확인을 함께 한다.
+        _floor = int(os.environ.get("SRW4S_MB_MOVE_FLOOR", "37"))
         if len(_mv) > _floor:
             print(f"FAIL 참조 이동 {len(_mv)}건 > 런타임 PASS floor {_floor}건 "
                   f"(QA 표준 8.3.1). SRW4S_MB_MOVE_FLOOR 로 명시적으로 올리세요")
@@ -652,13 +674,67 @@ def main() -> int:
                                 "mbankb_hidden_ledger.json").read_text(encoding="utf-8"))
             _hby = {r["id"]: r for r in _hid2["records"]}
             _hby.update({r["id"]: r for r in doc["records"]})
-            for _rid, _ko in _mv.items():
+            # **사정거리가 빠듯한 것부터** 구멍을 준다. 그냥 사전 순으로 주면
+            # 여유 있는 레코드가 좋은 구멍을 먼저 차지해, 정작 빠듯한 것이 밀려난다
+            # (2026-09-12: BH:0631C 이 1,313 B 차이로 밀렸다).
+            def _reach_key(_it):
+                _r0 = _hby.get(_it[0])
+                if not _r0:
+                    return (1 << 30)
+                _rf = mbankb_href.refs_to(bytes(data), _r0["offset"])
+                return mbankb_href.reach(_rf)[1] if _rf else (1 << 30)
+
+            for _rid, _ko in sorted(_mv.items(), key=_reach_key):
                 _r = _hby.get(_rid)
                 if not _r:
                     print(f"FAIL 표밖 이동 {_rid}: 원장에 없다")
                     return 1
                 _nb = encode(_ko, enc)
                 _at = len(data)
+                # **s16 사정거리 검사.** 참조는 자기 위치 기준 s16 이라 32,767 까지만
+                # 앞을 볼 수 있다. 블롭 끝이 멀어지면 앞쪽 참조가 못 닿고, 그러면
+                # 게임이 음수로 읽어 블롭 **앞으로** 튕겨 나간다
+                # (2026-09-10 실측: 스테이지 14 닥터 헬/브로큰 백작 공격 시 멈춤).
+                _refs = mbankb_href.refs_to(bytes(data), _r["offset"])
+                if not _refs:
+                    print(f"FAIL 표밖 이동 {_rid}: 가리키는 참조가 없다")
+                    return 1
+                _lo, _hi = mbankb_href.reach(_refs)
+                if _at > _hi:
+                    # 블롭 끝이 사정거리 밖이면 **가까운 빈 구멍**에 놓는다.
+                    # 구멍 = 원장이 안 덮고 슬롯표도 아닌 자리 중, 재배치가 아직
+                    # 안 건드린 곳(원본과 바이트가 같으면 안 쓴 것이다).
+                    _spot = None
+                    for _hi2, (_ha, _hn) in enumerate(_freeholes):
+                        if _hn < len(_nb) or not (_lo < _ha <= _hi):
+                            continue
+                        if bytes(data[_ha:_ha + _hn]) != orig[_ha:_ha + _hn]:
+                            continue
+                        # **이미 남이 가리키는 자리는 안 된다.** 원장이 안 덮는 구멍이어도
+                        # 참조 대상일 수 있다(중간 별칭 등). 그러면 내 레코드가 그 참조에도
+                        # 걸려 엉뚱한 대사가 뜬다 — 최종 검사가 참조 수 불일치로 잡아낸다.
+                        if any(_ha <= _t < _ha + len(_nb) for _t in _reftargets):
+                            continue
+                        _spot = (_hi2, _ha, _hn)
+                        break
+                    if _spot is None:
+                        _nofit_reach.append((_rid, _at - _hi, _ko))
+                        continue
+                    _i, _ha, _hn = _spot
+                    _at = _ha
+                    data[_ha:_ha + len(_nb)] = _nb
+                    _freeholes[_i] = (_ha + len(_nb), _hn - len(_nb))
+                    try:
+                        _n = mbankb_href.repoint(data, _r["offset"], _at)
+                    except ValueError as e:
+                        print(f"FAIL 표밖 이동 {_rid}: {e}")
+                        return 1
+                    _moved.append((_rid, _r["offset"], _at, _nb, _n))
+                    for _ra in _refs:
+                        _reref.append((_ra, _at - _ra))
+                    print(f"표 밖 이동(구멍): {_rid} 0x{_r['offset']:05X}"
+                          f" -> 0x{_at:05X}({len(_nb)}B) / 참조 {_n}곳  {_ko}")
+                    continue
                 data += _nb
                 try:
                     _n = mbankb_href.repoint(data, _r["offset"], _at)
@@ -674,6 +750,8 @@ def main() -> int:
                     print(f"FAIL 표밖 이동 {_rid}: 새 자리 내용이 다르다")
                     return 1
                 _moved.append((_rid, _r["offset"], _at, _nb, _n))
+                for _ra in _refs:
+                    _reref.append((_ra, _at - _ra))
                 print(f"표 밖 이동: {_rid} 0x{_r['offset']:05X}({_r['end']-_r['offset']}B)"
                       f" -> 0x{_at:05X}({len(_nb)}B) / 참조 {_n}곳 재연결  {_ko}")
 
@@ -695,6 +773,10 @@ def main() -> int:
                 for _m in _bad[:12]:
                     print("FAIL 표 밖 이동 최종 검사 — " + _m)
                 return 1
+            if _nofit_reach:
+                print(f"  s16 사정거리 밖이라 못 옮긴 것 {len(_nofit_reach)}건:")
+                for _rid, _over, _ko in _nofit_reach[:10]:
+                    print(f"     {_rid}  {_over} B 초과  {_ko}")
             print(f"  표 밖 이동 최종 검사 통과: {len(_moved)}건 / "
                   f"참조 {sum(m[4] for m in _moved)}곳")
 
@@ -723,6 +805,17 @@ def main() -> int:
             print(f"FAIL 블롭 {len(data):,} B > 상한 {MAX_BLOB:,} B "
                   f"(실측 안전선). RELOC_RESERVE 를 줄이거나 항목을 덜어내세요")
             return 1
+
+    # 게이트: **재연결한 참조는 전부 s16 안이어야 한다.**
+    # 블롭 전체를 훑는 방식은 못 쓴다 — 한글은 2바이트 코드가 0xEF~0xF5 로 시작해서
+    # u16 으로 읽으면 항상 32,767 을 넘고, 레코드 본문 안의 `{C:01}{A}` 도 표로 잡힌다.
+    # 그래서 **repoint 가 실제로 쓴 자리만** 본다 (2026-09-10: 전수 스캔이 오탐 178건).
+    _ovf = [(a, d) for a, d in _reref if d > mbankb_href_mod.S16MAX]
+    if _ovf:
+        print(f"FAIL 재연결한 참조 {len(_ovf)}건이 s16 범위(32,767)를 넘었다")
+        for _a, _d in _ovf[:10]:
+            print(f"     u16@{_a} delta {_d}  (s16 으로 {_d - 0x10000})")
+        return 1
 
     data = bytes(data)
     assert len(data) >= len(orig), "크기가 줄었다"
