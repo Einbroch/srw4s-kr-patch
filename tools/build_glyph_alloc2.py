@@ -19,6 +19,13 @@ from text_codec import parse_record               # noqa: E402
 from span_classify import charmap                 # noqa: E402
 from hangul_font import HangulFont                # noqa: E402
 
+EXTRA: dict = {}
+try:
+    import runpy as _rp
+    EXTRA = _rp.run_path(str(ROOT / "translation" / "glyph_extra.py"))["EXTRA"]
+except Exception:
+    pass
+
 LO, HI = 0x100, 0x700
 
 # **코드가 직접 넣는 글리프** — 텍스트 어디에도 안 나와서 빈도 조사에 안 잡힌다.
@@ -57,10 +64,12 @@ def main() -> int:
         syl |= {ch for r in BB["records"] if r["ko"]
                 for ch in TOK.sub("", r["ko"]) if "가" <= ch <= "힣"}
 
+    # 한글이 아닌 **선언된 추가 글리프**(translation/glyph_extra.py) 도 자리를 받는다.
+    syl |= set(EXTRA)
     syl = sorted(syl)
 
     font = HangulFont()
-    missing = [c for c in syl if c not in font]
+    missing = [c for c in syl if c not in font and c not in EXTRA]
     if missing:
         print(f"FAIL: 글꼴에 없는 음절 {len(missing)}자: {''.join(missing[:20])}")
         return 1
@@ -127,6 +136,17 @@ def main() -> int:
             alloc[c] = g
             taken.add(g)
     kept = len(alloc)
+    # **기존 배정이 하나라도 옮겨지면 멈춘다.** 세이브가 주인공 이름을 글리프 ID 로
+    # 들고 있어(2026-08-24 실기) 배정이 바뀌면 이미 만든 세이브의 이름이 깨진다.
+    # 2026-09-12: 글자 하나 추가하려고 돌렸다가 71자가 조용히 옮겨졌다 —
+    # 배포된 글꼴에서 비트맵을 대조해 역산해 되돌려야 했다.
+    lost = sorted(c for c in prev if c in syl and c not in alloc)
+    if lost and "--allow-move" not in sys.argv:
+        print(f"FAIL: 기존 배정 {len(lost)}자가 옮겨진다 — 세이브의 이름이 깨진다.")
+        print(f"  {''.join(lost[:40])}{'...' if len(lost) > 40 else ''}")
+        print("  이전 슬롯이 이번 후보에서 빠졌다(보존/역문보호로 분류되었을 수 있다).")
+        print("  정말 옮겨야 하면 --allow-move 를 주고, **기존 세이브가 깨진다**고 알린다.")
+        return 1
     pool = iter([g for g in cand if g not in taken])
     for c in syl:
         if c in alloc:

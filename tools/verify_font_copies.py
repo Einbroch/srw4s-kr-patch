@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from font_inject import COPIES, BANK_LEN, glyph_offset, load_alloc   # noqa: E402
 from hangul_font import HangulFont                                    # noqa: E402
+from font_inject import EXTRA                                          # noqa: E402
 
 PROBE = 1024
 
@@ -64,7 +65,7 @@ def main() -> int:
         d = out.read_bytes()
         miss = [ch for ch, hx in alloc["hangul"].items()
                 if d[glyph_offset(offs, int(hx, 16)):
-                     glyph_offset(offs, int(hx, 16)) + 32] != font.glyph(ch)]
+                     glyph_offset(offs, int(hx, 16)) + 32] != (EXTRA[ch] if ch in EXTRA else font.glyph(ch))]
         print(f"  {name:8s} -> {dst:16s} 한글 {len(alloc['hangul'])}자 중 불일치 {len(miss)}")
         if miss:
             print("      " + "".join(miss[:20]))

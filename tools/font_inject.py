@@ -45,6 +45,14 @@ def glyph_offset(offs: dict, gid: int) -> int:
     return base + (gid - (0x100 if b == "mid" else 0x500)) * 32
 
 
+EXTRA: dict = {}
+try:
+    import runpy as _rp
+    EXTRA = _rp.run_path(str(ROOT / "translation" / "glyph_extra.py"))["EXTRA"]
+except Exception:
+    pass
+
+
 def load_alloc() -> dict:
     return json.loads((ROOT / "translation" / "glyph_alloc.json").read_text(encoding="utf-8"))
 
@@ -56,7 +64,7 @@ def inject(data: bytearray, offs: dict, alloc: dict, font) -> int:
         gid = int(hexid, 16)
         if gid in preserved:
             raise SystemExit(f"보존 글리프 0x{gid:03X}에 한글을 덮으려 한다")
-        bm = font.glyph(ch)
+        bm = EXTRA[ch] if ch in EXTRA else font.glyph(ch)
         if len(bm) != 32:
             raise SystemExit(f"{ch} 비트맵이 32B가 아니다 ({len(bm)}B)")
         o = glyph_offset(offs, gid)

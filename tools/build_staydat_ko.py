@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from hangul_font import HangulFont   # noqa: E402
+from font_inject import EXTRA        # noqa: E402  선언 글리프(… 등)
 
 STAY = ROOT / "extract" / "DAT" / "STAYDAT.BIN"
 FONT_LO, FONT_HI = 0x36838, 0x43838          # 전체 글꼴 구간
@@ -62,7 +63,7 @@ def main() -> int:
         if gid in preserved:
             print(f"FAIL: 보존 글리프 0x{gid:03X}에 한글을 덮으려 한다")
             return 1
-        bm = font.glyph(ch)
+        bm = EXTRA[ch] if ch in EXTRA else font.glyph(ch)
         if len(bm) != 32:
             print(f"FAIL: {ch} 비트맵이 32B가 아니다 ({len(bm)}B)")
             return 1
