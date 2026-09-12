@@ -194,54 +194,102 @@ def main() -> int:
 
         # --- 표 밖 이웃끼리 바이트 주고받기 (총 길이 보존) ---
         # 표 밖 레코드는 진입점이 아니라 **경유지**다. VM 이 앞쪽 진입점에서 흘러와
-        # 종단(0xFF)을 세며 지나간다(실기 dropsrc4). 그래서 두 이웃의 **총 바이트**와
-        # **종단 개수**만 지키면 경계는 옮겨도 된다 — 뒤쪽 오프셋이 하나도 안 변한다.
-        _pair = runpy.run_path(str(ROOT / "translation" / "mbankb_relocate_ko.py")
-                               ).get("HIDDEN_PAIR", [])
-        if _pair:
+        # 종단(0xFF)을 세며 지나간다(실기 dropsrc4). 그래서 이웃들의 **총 바이트**와
+        # **종단 개수**만 지키면 경계는 옮겨도 된다 — 구간 밖 오프셋이 하나도 안 변한다.
+        # `HIDDEN_PAIR`(2개) 는 `HIDDEN_GROUP`(N개) 의 특수한 경우다.
+        _mod = runpy.run_path(str(ROOT / "translation" / "mbankb_relocate_ko.py"))
+        _pair = _mod.get("HIDDEN_PAIR", [])
+        _groups = [[(a, ka), (b, kb)] for a, ka, b, kb in _pair]
+        _groups += [list(g) for g in _mod.get("HIDDEN_GROUP", [])]
+        if _groups:
+            from build_mbankb_ledger import nslots
             _by = {r["id"]: r for r in H["records"]}
             _hdr = list(struct.unpack_from("<61I", bytes(data), 0))
             _tbls = [o for o in _hdr if o and o + 0x200 <= len(data)]
-            for _ida, _koa, _idb, _kob in _pair:
-                _a, _b = _by.get(_ida), _by.get(_idb)
-                if not _a or not _b:
-                    print(f"FAIL 짝 {_ida}/{_idb}: 원장에 없다")
+            for _g in _groups:
+                _nm = "/".join(i for i, _ in _g)
+                _rs = [_by.get(i) for i, _ in _g]
+                if any(r is None for r in _rs):
+                    print(f"FAIL 묶음 {_nm}: 원장에 없다")
                     return 1
-                if _a["end"] != _b["offset"]:
-                    print(f"FAIL 짝 {_ida}/{_idb}: 붙어 있지 않다 "
-                          f"({_a['end']:#07x} != {_b['offset']:#07x})")
+                _brk = [(x["id"], y["id"]) for x, y in zip(_rs, _rs[1:])
+                        if x["end"] != y["offset"]]
+                if _brk:
+                    print(f"FAIL 묶음 {_nm}: 붙어 있지 않다 {_brk}")
                     return 1
-                _lo, _hi = _a["offset"], _b["end"]
-                # 게이트: 이 구간을 가리키는 슬롯·점프가 하나라도 있으면 경계를 못 옮긴다.
+                _lo, _hi = _rs[0]["offset"], _rs[-1]["end"]
+                _bs = [encode(k, enc) for _, k in _g]
+                if sum(len(x) for x in _bs) != _hi - _lo:
+                    print(f"FAIL 묶음 {_nm}: 합계 "
+                          f"{'+'.join(str(len(x)) for x in _bs)} != {_hi - _lo} B")
+                    return 1
+                # 새 시작 자리 (경계가 움직인 레코드를 알아야 점프를 보정한다)
+                _starts, _p = {}, _lo
+                for _r, _bb in zip(_rs, _bs):
+                    _starts[_r["offset"]] = _p
+                    _p += len(_bb)
+                # 게이트 1 — 슬롯. **표 길이는 데이터로 구한다**: 256/400 고정으로 읽으면
+                #   표 뒤 레코드 바이트를 포인터로 오해해 가짜가 잡힌다
+                #   (2026-09-12: 0x0CC1A[392] 가 그랬다) → [[table-length-from-data]]
                 _ptr = []
                 for _t in _tbls:
-                    for _k in range((len(data) - _t) // 2):
-                        if _k >= 400:
-                            break
+                    _b0 = _t & ~0xFFFF
+                    for _k in range(nslots(bytes(data), _t)):
                         _v = struct.unpack_from("<H", bytes(data), _t + 2 * _k)[0]
-                        if _lo <= _v < _hi:
+                        if _lo <= _b0 + _v < _hi:
                             _ptr.append(f"슬롯 {_t:#07x}[{_k}]")
+                # 게이트 2 — 점프. 레코드 **시작**을 가리키면 s16 을 보정해 따라가게 한다.
+                #   **중간**을 가리키면 따라갈 근거가 없으므로 실패시킨다.
+                _fix = []
                 _q = 0
                 while _q < len(data) - 3:
                     if data[_q] == 0xFC and data[_q + 1] in (6, 7):
                         _tg = _q + 2 + struct.unpack_from("<h", bytes(data), _q + 2)[0]
                         if _lo <= _tg < _hi:
-                            _ptr.append(f"점프 {_q:#07x}")
+                            if _tg in _starts:
+                                if _starts[_tg] != _tg:
+                                    _fix.append((_q, _tg, _starts[_tg]))
+                            else:
+                                _ptr.append(f"점프 {_q:#07x} -> 레코드 중간 {_tg:#07x}")
                         _q += 4
                     else:
                         _q += 1
                 if _ptr:
-                    print(f"FAIL 짝 {_ida}/{_idb}: 구간을 가리키는 것이 있다 {_ptr[:6]}")
+                    print(f"FAIL 묶음 {_nm}: 구간을 가리키는 것이 있다 {_ptr[:6]}")
                     return 1
-                _na, _nb = encode(_koa, enc), encode(_kob, enc)
-                if len(_na) + len(_nb) != _hi - _lo:
-                    print(f"FAIL 짝 {_ida}/{_idb}: 합계 {len(_na)}+{len(_nb)} "
-                          f"!= {_hi - _lo} B")
+                # 게이트 3 — **`{C:01}{A}` 자기상대 참조**. 표 밖 대사 1,686개 중
+                #   1,437개(85%)가 이 표로**만** 닿는다(tools/mbankb_href.py).
+                #   슬롯도 점프도 없다고 안심하면 안 된다 — 2026-09-12 에 BH:0356A /
+                #   BH:042BA 묶음을 이 검사 없이 넣었다가 실기에서 코우지 피격 대사가
+                #   `코우지세!」` 로 깨졌다(옛 자리에서 읽음). 자리가 옮겨진 레코드는
+                #   참조를 **전부 새 자리로 돌린다**.
+                import mbankb_href as _href
+                _inside = [_o for _o, _n2 in _starts.items() if _o != _n2
+                           for _a in _href.refs_to(bytes(data), _o) if _lo <= _a < _hi]
+                if _inside:
+                    print(f"FAIL 묶음 {_nm}: 참조 u16 이 구간 안에 있다 "
+                          f"{[f'{x:#07x}' for x in _inside[:4]]}")
                     return 1
-                data[_lo:_hi] = _na + _nb
-                print(f"표 밖 짝 교체: {_ida} {len(_na)}B + {_idb} {len(_nb)}B "
-                      f"= {_hi - _lo}B (경계 {_a['end']:#07x} -> {_lo + len(_na):#07x})")
-
+                _rp = 0
+                for _o, _n2 in sorted(_starts.items()):
+                    if _o == _n2:
+                        continue
+                    try:
+                        _rp += _href.repoint(data, _o, _n2)
+                    except ValueError as _e:
+                        print(f"FAIL 묶음 {_nm}: 참조 재지정 불가 — {_e}")
+                        return 1
+                data[_lo:_hi] = b"".join(_bs)
+                for _q, _old, _new in _fix:
+                    _d = _new - (_q + 2)
+                    if not (-32768 <= _d <= 32767):
+                        print(f"FAIL 묶음 {_nm}: 점프 {_q:#07x} 보정이 s16 밖 ({_d})")
+                        return 1
+                    struct.pack_into("<h", data, _q + 2, _d)
+                print(f"표 밖 묶음 교체: {_nm} = "
+                      f"{'+'.join(str(len(x)) for x in _bs)} = {_hi - _lo}B "
+                      f"(0x{_lo:05X}..0x{_hi:05X}) / 점프 보정 {len(_fix)}곳"
+                      f" / 자기상대 참조 재지정 {_rp}곳")
     # --- 전투 화자 이름: 늘리고 **점프 s16 을 보정한다** ---
     # 자세한 근거는 tools/mbankb_jumpfix.py 머리말.
     from mbankb_jumpfix import grow_names, targets
@@ -822,17 +870,21 @@ def main() -> int:
     changed = sum(1 for a, b in zip(data, orig) if a != b)
     (ROOT / "build" / ("M_BANKB_ko_noext.dec" if NOEXT else "M_BANKB_ko.dec")).write_bytes(data)
 
-    # 키 레코드 런(454개)은 슬롯도 점프도 안 가리키고 **키 훑기**로만 닿는다.
-    # 시작 오프셋이 한 바이트라도 밀리면 화면에 색인 바이트가 글자로 찍힌다.
-    # v0.99e/f 가 이걸로 깨졌다. 자세한 근거는 tools/verify_mb_keyrun.py.
+    # 키 레코드 런은 **키 훑기**로 닿는다. 시작 오프셋이 밀리면 화면에 색인
+    # 바이트가 글자로 찍힌다 — v0.99e/f 가 이걸로 깨졌다.
+    # [2026-09-12 정정] "슬롯도 점프도 안 가리킨다" 는 틀렸다 — `{C:07}` 점프가
+    #   런 0x0AC01 의 0x0C8F8·0x0C908 을 가리킨다. 선언된 이동
+    #   (KEYRUN_SHIFT)은 봐주고 레코드 수·키 순서는 그대로 강제한다.
     from verify_mb_keyrun import check as _keyrun_check
-    _nrun, _nrec, _bad = _keyrun_check(bytes(orig), data)
+    _nrun, _nrec, _bad, _mv = _keyrun_check(bytes(orig), data)
     if _bad:
         print(f"FAIL 키 런 {_nrun}개({_nrec:,}레코드)가 원본과 어긋났다")
         for _m in _bad[:10]:
             print("   ", _m)
         return 1
-    print(f"키 런 {_nrun}개 / 레코드 {_nrec:,}개: 시작 오프셋·키 순서 원본과 일치")
+    if _mv:
+        print(f"  선언된 자리 이동 {len(_mv)}건 허용: {', '.join(_mv)}")
+    print(f"키 런 {_nrun}개 / 레코드 {_nrec:,}개: 키 순서 원본과 일치")
 
     comp = lzb_encode.compress(data)
     back, _ = lzb.decompress(comp)

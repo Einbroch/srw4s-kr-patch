@@ -5,7 +5,7 @@ PlayStation 『第4次スーパーロボット大戦S』(SLPS-00196, Japan Rev 1
 
 **원본 디스크 이미지는 포함하지 않습니다.** 직접 준비하셔야 합니다.
 
-## 지금 상태 (v0.99R)
+## 지금 상태 (v0.99S)
 
 | 항목 | 값 |
 |---|---:|
@@ -14,7 +14,7 @@ PlayStation 『第4次スーパーロボット大戦S』(SLPS-00196, Japan Rev 1
 | 표 슬롯 중 한글을 읽는 것 | 11,022 / 14,336 |
 | 스테이지 승리 조건 | 80 / 80 |
 | 가라오케 가사 | 124 / 124 |
-| 폰트에 새로 그린 한글 | 1,246자 |
+| 폰트에 새로 그린 한글 | 1,247자 |
 
 화면에 나오는 일본어 대사는 남아 있지 않습니다. 미번역으로 남은 80건은 전부
 포인터 표·애니메이션 데이터가 글자로 읽힌 것이라 화면에 뜨지 않습니다.
@@ -29,12 +29,12 @@ PlayStation 『第4次スーパーロボット大戦S』(SLPS-00196, Japan Rev 1
 
 ```
 xdelta3 -d -s "Dai-4-Ji Super Robot Taisen S (Japan) (Rev 1) (Track 1).bin" \
-           Dai-4-Ji_SRW_S_KR_v0.99R.xdelta \
+           Dai-4-Ji_SRW_S_KR_v0.99S.xdelta \
            "Track 1 (patched).bin"
 ```
 
 원본 Track 1 SHA-1 `39241b033cd8368713a30cf5b1a1e5d47fb3d353`
-→ 패치 후 `fe7a800d360ff9d566a6dbfafb09f9f070574a92`
+→ 패치 후 `6f56173057b51c5ce650f2d47458f5e17e8c5da4`
 
 Track 2/3 과 `.cue` 는 건드리지 않습니다.
 
