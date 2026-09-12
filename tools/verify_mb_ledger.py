@@ -28,9 +28,12 @@ WINDOW = 0x400
 
 
 SPEAKER: dict = {}
+MARKER_ADD: dict = {}
 try:
     import runpy as _rp
     SPEAKER = _rp.run_path(str(ROOT / "translation" / "mbanks_speaker_fix.py"))["SPEAKER"]
+    MARKER_ADD = _rp.run_path(
+        str(ROOT / "translation" / "mbanks_marker_fix.py"))["MARKER_ADD"]
 except Exception:
     pass
 
@@ -61,6 +64,11 @@ def main() -> int:
         # 대신 아래에서 진짜 제약인 줄 폭과 페이지당 줄 수를 강제한다.
         drop = lambda ms: collections.Counter(m for m in ms if m != "{N}")
         a, b = drop(markers(r["jp"])), drop(markers(r["ko"]))
+        if a != b and r["id"] in MARKER_ADD:
+            # 원문에 없던 마커를 넣은 **선언된** 예외만 봐준다
+            # (translation/mbanks_marker_fix.py). 그 마커 하나를 원문 쪽에
+            # 더해 보고, 그래도 다르면 실패시킨다.
+            a = a + collections.Counter([MARKER_ADD[r["id"]][0]])
         if a != b:
             miss = (a - b) or (b - a)
             err["marker"].append(f"{r['id']} {dict(miss)}")

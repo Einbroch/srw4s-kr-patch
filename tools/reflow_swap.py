@@ -34,8 +34,16 @@ LEDGER = ROOT / "translation" / "mbanks_ledger.json"
 
 
 def _inner(t: str):
-    """`{A}` 레코드에서 고쳐도 되는 구간 = 마지막 「」 안쪽."""
+    """고쳐도 되는 구간 = 마지막 인용부 안쪽.
+
+    속마음 대사는 「」 가 아니라 **괄호 `( )`** 를 쓴다(`마사키(도청이라도...)`).
+    괄호만 보던 시절에는 그런 쪽이 통째로 재조판에서 빠졌다 — 「」 를 먼저 찾고
+    없을 때만 괄호를 본다(대사 안에 괄호가 섞인 경우를 밀어내지 않으려고).
+    """
     a, b = t.rfind("「"), t.rfind("」")
+    if 0 <= a < b:
+        return (a + 1, b)
+    a, b = t.rfind("("), t.rfind(")")
     return (a + 1, b) if 0 <= a < b else None
 
 
@@ -73,8 +81,16 @@ def _is_speech(t: str) -> bool:
     body = re.sub(r"\{[^}]*\}", "", t)
     if len(body) < 2:
         return False
+    # 가나가 한 자라도 있으면 표 데이터다. 한국어 역문에는 안 나온다 —
+    # 비율 계산보다 이쪽이 훨씬 단단한 경계다.
+    if re.search(r"[぀-ヿ]", body):
+        return False
     han = sum(1 for c in body if "가" <= c <= "힣")
-    ok = sum(1 for c in body if c.isspace() or c in ".,!?~〜…'\"()·:;-0123456789")
+    # 2026-09-12 — **영문자를 세지 않아** `DC`·`ZZ건담`·`mkⅡ` 가 든 평범한 대사가
+    # 표 데이터로 오판돼 재조판에서 통째로 빠졌다(MB:0D6E2 / MB:1BE37).
+    ok = sum(1 for c in body
+             if c.isspace() or c.isascii() and (c.isalnum() or c in ".,!?'\"()·:;-=/")
+             or c in "~〜…")
     return han >= 2 and (han + ok) / len(body) >= 0.9
 
 
@@ -91,10 +107,15 @@ def _rewrap_page(rec, pg: str, enc, lpx: int, pl: int):
     ws = _words(body)
     if not ws:
         return pg
+    # 마지막 줄에는 닫는 `」`(tail) 이 붙는다. 이걸 안 세면 288px 로 꽉 채운 줄이
+    # 실제로는 296px 이 되어 화면에서 감긴다 — backlog 87건이 전부 이 8px 였다.
+    # `_px` 는 첫 줄 폭만 재므로 tail 이 `{N}」` 이면 0 이 나온다(맞는 값이다).
+    tailpx = _px(tail, enc)
     rows, cur, base = [], "", first
-    for w in ws:
+    for i, w in enumerate(ws):
+        extra = tailpx if i == len(ws) - 1 else 0
         trial = w if cur == "" else cur + " " + w
-        if base + _px(trial, enc) <= lpx:
+        if base + _px(trial, enc) + extra <= lpx:
             cur = trial
         else:
             if cur == "":
@@ -102,7 +123,7 @@ def _rewrap_page(rec, pg: str, enc, lpx: int, pl: int):
             rows.append(cur)
             cur, base = w, 0
     rows.append(cur)
-    if used + len(rows) > pl:
+    if used + len(rows) + tail.count("{N}") > pl:
         return None
     return head + "{N}".join(rows) + tail
 
