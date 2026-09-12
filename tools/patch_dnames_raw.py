@@ -8,6 +8,11 @@
 
     patch_dnames_raw.py            # tools/dnames_raw_patch.json 을 적용
 
+2026-09-12 — 규칙이 비었다. 하나뿐이던 `DN:0C4C` 네/아뇨 이동(`fc0202`->`fc0602`,
+눈대중 32px)은 **`patch_dnames_script.py`** 의 절대 위치 변환(`fc0202`->`fd158c`,
+형제 확인창과 같은 창 +1,+1 규칙)으로 대체됐다. 둘은 같은 바이트를 노려 **동시에
+쓸 수 없다** — 스크립트 쪽이 먼저 돌면 여기 find 가 0군데가 되어 실패한다.
+
 규칙: {"why": "...", "find": "hex", "replace": "hex"}  (find 와 replace 는 같은 길이)
 """
 from __future__ import annotations
