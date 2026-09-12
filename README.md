@@ -5,7 +5,7 @@ PlayStation 『第4次スーパーロボット大戦S』(SLPS-00196, Japan Rev 1
 
 **원본 디스크 이미지는 포함하지 않습니다.** 직접 준비하셔야 합니다.
 
-## 지금 상태 (v0.99j)
+## 지금 상태 (v0.99k)
 
 | 항목 | 값 |
 |---|---:|
@@ -29,12 +29,12 @@ PlayStation 『第4次スーパーロボット大戦S』(SLPS-00196, Japan Rev 1
 
 ```
 xdelta3 -d -s "Dai-4-Ji Super Robot Taisen S (Japan) (Rev 1) (Track 1).bin" \
-           Dai-4-Ji_SRW_S_KR_v0.99j.xdelta \
+           Dai-4-Ji_SRW_S_KR_v0.99k.xdelta \
            "Track 1 (patched).bin"
 ```
 
 원본 Track 1 SHA-1 `39241b033cd8368713a30cf5b1a1e5d47fb3d353`
-→ 패치 후 `6437e6690ad68a379f1a1dcaff4034281d503113`
+→ 패치 후 `d60da284553bb4347da7ceec64b4c8c3a8b40786`
 
 Track 2/3 과 `.cue` 는 건드리지 않습니다.
 
