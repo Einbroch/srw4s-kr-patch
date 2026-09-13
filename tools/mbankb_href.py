@@ -73,13 +73,22 @@ def tables(d: bytes):
                 return True
         return False
 
+    # **`fc 01` 이 바로 앞에 있으라고 요구하면 안 된다** (2026-09-13).
+    #   표는 `{C:01}` 뒤에만 오는 게 아니다. 실기에서 본 배치:
+    #     0x0CFAE: fc 01 | fc 07 80 03 | fa 06 <u16x6> | fa 05 <u16x5> | ...
+    #   `fc 07` 점프가 끼거나 표가 연달아 붙으면 옛 판정은 통째로 놓쳤다.
+    #   그렇게 못 본 참조가 **461곳**이고, 거기에 고쇼군 컷인 6개가 들어 있었다.
+    #   놓친 참조를 안 돌리고 레코드를 옮기면 게임이 옛 주소에서 읽는다
+    #   (2026-09-13 실기: `/kN키리「빗나갔네~」`) → [[mbankb-blind-records]]
+    #   `fa NN` 만으로 판정해도 옛 결과를 **하나도 안 잃는** 상위집합이다
+    #   (4,521 -> 4,982곳, 놓침 0). 검증: 항목이 전부 블롭 안을 가리켜야 한다.
     while p < n_max - 4:
-        if d[p] == 0xFC and d[p + 1] == 0x01 and d[p + 2] == 0xFA and not in_slots(p):
-            n = d[p + 3]
-            if 1 <= n <= 16 and p + 4 + 2 * n <= n_max:
+        if d[p] == 0xFA and not in_slots(p):
+            n = d[p + 1]
+            if 1 <= n <= 16 and p + 2 + 2 * n <= n_max:
                 vals, ok = [], True
                 for k in range(n):
-                    a = p + 4 + 2 * k
+                    a = p + 2 + 2 * k
                     v = struct.unpack_from("<H", d, a)[0]
                     t = a + v
                     if not (0 <= t < n_max):
@@ -88,7 +97,7 @@ def tables(d: bytes):
                     vals.append((a, v, t))
                 if ok:
                     out.append((p, vals))
-                    p = p + 4 + 2 * n
+                    p = p + 2 + 2 * n
                     continue
         p += 1
     return out
