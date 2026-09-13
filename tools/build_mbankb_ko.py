@@ -206,6 +206,8 @@ def main() -> int:
             _by = {r["id"]: r for r in H["records"]}
             _hdr = list(struct.unpack_from("<61I", bytes(data), 0))
             _tbls = [o for o in _hdr if o and o + 0x200 <= len(data)]
+            from verify_mb_keyrun import keyruns as _kr
+            _keyrec = {_p for _rec in _kr(bytes(orig)).values() for _p, _ in _rec}
             for _g in _groups:
                 _nm = "/".join(i for i, _ in _g)
                 _rs = [_by.get(i) for i, _ in _g]
@@ -241,11 +243,13 @@ def main() -> int:
                 # 게이트 2 — 점프. 레코드 **시작**을 가리키면 s16 을 보정해 따라가게 한다.
                 #   **중간**을 가리키면 따라갈 근거가 없으므로 실패시킨다.
                 _fix = []
+                _jt = set()
                 _q = 0
                 while _q < len(data) - 3:
                     if data[_q] == 0xFC and data[_q + 1] in (6, 7):
                         _tg = _q + 2 + struct.unpack_from("<h", bytes(data), _q + 2)[0]
                         if _lo <= _tg < _hi:
+                            _jt.add(_tg)
                             if _tg in _starts:
                                 if _starts[_tg] != _tg:
                                     _fix.append((_q, _tg, _starts[_tg]))
@@ -269,6 +273,41 @@ def main() -> int:
                 if _inside:
                     print(f"FAIL 묶음 {_nm}: 참조 u16 이 구간 안에 있다 "
                           f"{[f'{x:#07x}' for x in _inside[:4]]}")
+                    return 1
+                # 게이트 4 — **진입 경로를 모르는 레코드는 못 민다** (2026-09-13).
+                #   슬롯·`fc 06/07` 점프·`{C:01}{A}` 참조·키 런, 넷 중 아무것도 안 닿는
+                #   레코드가 있다. 게임은 그걸 **절대 위치로** 찾아가는데 우리는 그
+                #   경로를 못 본다 — 그러니 자리를 옮기면 옛 주소에서 읽는다.
+                #   2026-09-13 실기: `BH:0D6A7`(키리 빗나갔네)을 -4 밀었더니 화면에
+                #   `/kN키리「빗나갔네~」` 로 떴다(제어 앞머리가 글자로 찍힘).
+                #   게이트 1~3 은 전부 통과했다 — 아는 경로가 하나도 없으니 당연하다.
+                #   → [[exhaustive-is-not-complete]]
+                _blind = []
+                for _o, _n2 in sorted(_starts.items()):
+                    if _o == _n2:
+                        continue
+                    if _href.refs_to(bytes(data), _o):
+                        continue
+                    if any(f"{_o:#07x}" in _x for _x in ()):   # (자리표시)
+                        continue
+                    _hit = False
+                    for _t in _tbls:                      # 슬롯
+                        _b0 = _t & ~0xFFFF
+                        for _k in range(nslots(bytes(data), _t)):
+                            if _b0 + struct.unpack_from("<H", bytes(data), _t + 2 * _k)[0] == _o:
+                                _hit = True
+                                break
+                        if _hit:
+                            break
+                    if not _hit and _o in _jt:           # `fc 06/07` 점프 — 게이트 2 가 보정한다
+                        _hit = True
+                    if not _hit and _o in _keyrec:        # 키 런 안이면 순차 훑기가 따라온다
+                        _hit = True
+                    if not _hit:
+                        _blind.append(_o)
+                if _blind:
+                    print(f"FAIL 묶음 {_nm}: 진입 경로를 모르는 레코드를 민다 "
+                          f"{[f'{x:#07x}' for x in _blind[:6]]} — 절대 위치로 찾아오는 자리다")
                     return 1
                 _rp = 0
                 for _o, _n2 in sorted(_starts.items()):
@@ -342,20 +381,42 @@ def main() -> int:
     #   다시 넣으려면 아래 튜플에 ("一矢", "카즈") 를 넣으면 된다 (길이가 같아야 한다).
     # 길이가 **같은** 치환만 한다. 늘리면 다른 진입 경로가 어긋난다
     # (v0.99e/f 결함 → [[verify-each-entry-path]]).
+    # **대사 칸 안에서만 바꾼다** (2026-09-13). 예전에는 블롭 전체를 눈감고
+    #   찾아 바꿨다. `洸`(2 B) 같은 짧은 패턴은 `{C:01}{A}` 참조표의 u16 과
+    #   우연히 같아지기 쉬워서, 표 항목을 글자로 오인해 덮어썼다 — 실제로
+    #   0x0595E(v0.99S 부터)와 0x03A8C 두 곳이 그렇게 깨져 있었다. 깨진 참조는
+    #   s16 으로 읽혀 블롭 앞쪽을 가리키고, 화면에는 대사가 중간부터 찍힌다.
+    _namecov = bytearray(len(data))
+    for _rr in list(doc["records"]) + json.loads(
+            (ROOT / "translation" / "mbankb_hidden_ledger.json")
+            .read_text(encoding="utf-8"))["records"]:
+        for _k in range(_rr["offset"], min(_rr["end"], len(data))):
+            _namecov[_k] = 1
+    for _s3, _v3 in mbankb_href_mod.tables(bytes(data)):      # 표는 글자가 아니다
+        for _k in range(max(0, min(a for a, _, _ in _v3) - 4),
+                        min(max(a for a, _, _ in _v3) + 2, len(data))):
+            _namecov[_k] = 0
+    for _a3, _b3 in mbankb_href_mod.slot_spans(bytes(data)):
+        for _k in range(_a3, min(_b3, len(data))):
+            _namecov[_k] = 0
     for _jp, _ko in (("一矢", "카즈"), ("ギャリソン", "개리 "), ("洸", "광")):
         _pj, _pk = encode(_jp, enc)[:-1], encode(_ko, enc)[:-1]
         assert len(_pj) == len(_pk), (_jp, _ko)
-        _n = 0
+        _n = _skip = 0
         _i = 0
         while True:
             _i = bytes(data).find(_pj, _i)
             if _i < 0:
                 break
-            data[_i:_i + len(_pk)] = _pk
-            _n += 1
+            if all(_namecov[_i:_i + len(_pj)]):
+                data[_i:_i + len(_pk)] = _pk
+                _n += 1
+            else:
+                _skip += 1
             _i += len(_pk)
-        if _n:
-            print(f"이름표 제자리 치환: {_jp} -> {_ko}  {_n}곳 ({len(_pj)}B 그대로)")
+        if _n or _skip:
+            print(f"이름표 제자리 치환: {_jp} -> {_ko}  {_n}곳 ({len(_pj)}B 그대로)"
+                  + (f" / 대사 칸 밖이라 건너뜀 {_skip}곳" if _skip else ""))
 
     # --- (보류) 이름표 확장 ---
     # 이름표는 2차 해제본(0x801A6878)에서 읽히므로 확장 구간에 놓으면 안 된다.
@@ -690,6 +751,16 @@ def main() -> int:
                 _cov[_k] = 1
         for _a, _b in mbankb_href_mod.slot_spans(orig):
             for _k in range(_a, min(_b, len(orig))):
+                _cov[_k] = 1
+        # **`{C:01}{A}` 참조표도 산 데이터다** (2026-09-13).
+        #   원장이 안 덮는다고 빈 구멍이 아니다 — 표는 레코드가 아니라 VM 이 걸어
+        #   들어가 읽는 분기표이고, 표 밖 대사 85%가 이걸로**만** 닿는다.
+        #   안 세는 바람에 0x04C00·0x05B30 언저리 표 30개(참조 92곳)를 재배치
+        #   레코드가 덮어썼고 `BH:061E1` 은 유일한 진입로를 잃었다 (v0.99L~v0.99S).
+        for _s2, _v2 in mbankb_href_mod.tables(orig):
+            _a2 = min(a for a, _, _ in _v2) - 4
+            _b2 = max(a for a, _, _ in _v2) + 2
+            for _k in range(max(0, _a2), min(_b2, len(orig))):
                 _cov[_k] = 1
         _reftargets = {_t for _s2, _v2 in mbankb_href_mod.tables(bytes(data))
                        for _a2, _vv2, _t in _v2}
