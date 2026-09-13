@@ -44,10 +44,14 @@ def _overrides():
 
 
 def _decode(raw_with_ff, a, b):
+    # **글리프 0 은 공백이다.** `charmap()` 은 0 을 빈 문자열로 낸다. override 스팬은
+    # 레코드 통짜라 띄어쓰기가 뜻을 가르므로(`LOW INTENSICY`, `TIME FOR L-GAIM`,
+    # 가라오케 가사) 여기서만 되돌린다. `charmap()` 자체를 고치면 `is_drawing`/
+    # `is_kana_grid` 판정이 흔들려 분류가 4건 뒤집힌다(`DN:C245` 는 스팬을 잃는다).
     m = _charmap(); pos = 0; chars = []
     for t in parse_record(raw_with_ff):
         if t.kind == "glyph" and a <= pos < b:
-            chars.append(m.get(t.glyph_id, ""))
+            chars.append(" " if t.glyph_id == 0 else m.get(t.glyph_id, ""))
         pos += len(t.raw)
     return "".join(chars)
 from measure_growth import build_lowbank_chars, donor_pairs  # noqa: E402

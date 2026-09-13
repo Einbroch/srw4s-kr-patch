@@ -70,7 +70,9 @@ def main() -> int:
                     m = charmap(); pos = 0; chars = []
                     for t in parse_record(raw_ff):
                         if t.kind == "glyph" and a <= pos < b:
-                            chars.append(m.get(t.glyph_id, ""))
+                            # 글리프 0 = 공백 (build_dnames_ledger._decode 와 같은 규약)
+                            chars.append(" " if t.glyph_id == 0
+                                         else m.get(t.glyph_id, ""))
                         pos += len(t.raw)
                     sp.append((a, b, "".join(chars)))
             sp.sort(key=lambda x: x[0])
